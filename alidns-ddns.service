@@ -1,0 +1,14 @@
+[Unit]
+Description=AliDNS DDNS Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/alidns-ddns --config /etc/alidns-ddns/config.json
+Restart=always
+RestartSec=10
+EnvironmentFile=/etc/alidns-ddns/env
+
+[Install]
+WantedBy=multi-user.target

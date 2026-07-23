@@ -1,0 +1,8 @@
+{
+    "AccessKeyID": "your-access-key-id",
+    "AccessKeySecret": "your-access-key-secret",
+    "DomainName": "example.com",
+    "RR": "@",
+    "IPv": "4",
+    "Interval": 300
+}

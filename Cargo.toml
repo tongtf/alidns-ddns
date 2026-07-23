@@ -1,0 +1,32 @@
+[package]
+name = "alidns-ddns"
+version = "1.0.0"
+edition = "2021"
+authors = ["tongtf"]
+description = "阿里云域名动态解析工具 (Aliyun DDNS) — 自动获取公网 IPv4/IPv6 并更新 DNS 记录"
+license = "Apache-2.0"
+repository = "https://github.com/tongtf/alidns-ddns"
+homepage = "https://github.com/tongtf/alidns-ddns"
+readme = "README.md"
+keywords = ["aliyun", "ddns", "dns", "ipv6", "dynamic-dns"]
+categories = ["command-line-utilities", "network-programming"]
+rust-version = "1.70"
+
+[dependencies]
+reqwest = { version = "0.12", features = ["blocking", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+urlencoding = "2"
+local-ip-address = "0.6"
+clap = { version = "4", features = ["derive", "env"] }
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+codegen-units = 1
