@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            artifact: alidns-ddns-linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            artifact: alidns-ddns-linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Compress with UPX
+        run: |
+          sudo apt-get update && sudo apt-get install -y upx
+          upx --best target/${{ matrix.target }}/release/alidns-ddns
+
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ matrix.artifact }}.tar.gz alidns-ddns
+          cd ../../../
+          sha256sum ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.tar.gz.sha256
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body: |
+            ## alidns-ddns ${{ github.ref_name }}
+
+            轻量级阿里云 DDNS 工具 — 单文件 Rust 实现，专注阿里云 DNS。
+
+            ### 下载
+
+            | 平台 | 文件 | 校验和 |
+            |------|------|--------|
+            | Linux x86_64 | `alidns-ddns-linux-amd64.tar.gz` | `.sha256` |
+            | Linux ARM64 | `alidns-ddns-linux-arm64.tar.gz` | `.sha256` |
+
+            ### 使用
+
+            ```bash
+            tar xzf alidns-ddns-linux-amd64.tar.gz
+            ./alidns-ddns --domain example.com --rr @ --access-key-id YOUR_KEY --access-key-secret YOUR_SECRET
+            ```
+
+            ### 变更
+
+            详见 [commits](https://github.com/tongtf/alidns-ddns/commits/${{ github.ref_name }})
+          files: artifacts/*
+          generate_release_notes: true
