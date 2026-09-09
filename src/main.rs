@@ -137,7 +137,7 @@ impl Config {
                 .clone()
                 .or_else(|| env::var("ALIDNS_INTERFACE").ok().filter(|v| !v.is_empty()))
                 .unwrap_or(file_config.Interface)
-                .if_empty(String::new)
+                .if_empty(String::new),
         }
     }
 }
@@ -219,10 +219,7 @@ fn get_ipv6(interface: Option<&str>) -> String {
                         iface
                     );
                 } else {
-                    eprintln!(
-                        "⚠️ 警告: 指定网卡 \"{}\" 不存在，自动搜索可用网卡。",
-                        iface
-                    );
+                    eprintln!("⚠️ 警告: 指定网卡 \"{}\" 不存在，自动搜索可用网卡。", iface);
                 }
             }
             netifs
