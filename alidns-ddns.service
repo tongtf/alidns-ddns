@@ -1,14 +1,45 @@
 [Unit]
 Description=AliDNS DDNS Service
+Documentation=https://github.com/tongtf/alidns-ddns
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+# 以动态、临时账号运行，无持久化账户、进程结束自动回收权限
+DynamicUser=yes
 ExecStart=/usr/local/bin/alidns-ddns --config /etc/alidns-ddns/config.json
+EnvironmentFile=/etc/alidns-ddns/env
 Restart=always
 RestartSec=10
-EnvironmentFile=/etc/alidns-ddns/env
+
+# --- 文件系统只读隔离 ---
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/
+
+# --- 内核 / 硬件 / 命名空间收缩 ---
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectDevices=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+
+# --- 进程 / 能力 / 权限提升限制 ---
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+PrivateDevices=yes
+PrivatePIDs=yes
+KeyringMode=private
+
+# --- 仅放行必要的网络地址族(HTTPS + 本地网卡 IPv6 发现) ---
+RestrictAddressFamilies=AF_NETLINK AF_LOCAL AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target

@@ -1,13 +1,11 @@
-use clap::Parser;
 use hmac::{Hmac, Mac};
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 macro_rules! map {
     ($($k:expr => $v:expr),* $(,)?) => {{
@@ -17,40 +15,116 @@ macro_rules! map {
     }};
 }
 
-#[derive(Parser)]
-#[command(name = "alidns-ddns", about = "阿里云域名动态解析工具")]
+#[derive(Debug)]
 struct Args {
-    /// AccessKey ID
-    #[arg(long, env = "ALIBABA_CLOUD_ACCESS_KEY_ID")]
     access_key_id: Option<String>,
-
-    /// AccessKey Secret
-    #[arg(long, env = "ALIBABA_CLOUD_ACCESS_KEY_SECRET")]
     access_key_secret: Option<String>,
-
-    /// 域名（如 example.com）
-    #[arg(long, env = "ALIDNS_DOMAIN")]
     domain: Option<String>,
-
-    /// 主机记录（如 www, @, a）
-    #[arg(long, env = "ALIDNS_RR")]
     rr: Option<String>,
-
-    /// IP模式: 4(IPv4), 6(IPv6), 46(双栈)
-    #[arg(long, env = "DDNS_IPV")]
     ipv: Option<String>,
-
-    /// 网卡名称（用于获取本地IP，如 eth0）；不存在时自动搜索并告警
-    #[arg(long, env = "ALIDNS_INTERFACE")]
     interface: Option<String>,
-
-    /// 更新间隔（秒）
-    #[arg(long, env = "DDNS_INTERVAL")]
     interval: Option<u64>,
-
-    /// 配置文件路径
-    #[arg(short, long, default_value = "config.json")]
     config: String,
+}
+
+fn usage() -> String {
+    r#"alidns-ddns — 阿里云域名动态解析工具
+
+用法:
+  alidns-ddns [选项]
+
+选项:
+  --access-key-id <ID>              AccessKey ID (环境变量 ALIBABA_CLOUD_ACCESS_KEY_ID)
+  --access-key-secret <SECRET>      AccessKey Secret (环境变量 ALIBABA_CLOUD_ACCESS_KEY_SECRET)
+  --domain <DOMAIN>                 域名，如 example.com (ALIDNS_DOMAIN)
+  --rr <RR>                         主机记录，如 @、www (ALIDNS_RR, 默认 @)
+  --ipv <MODE>                      IP 模式: 4 / 6 / 46 (DDNS_IPV, 默认 4)
+  --interface <NAME>                网卡名，用于获取 IPv6 (ALIDNS_INTERFACE, 自动搜索)
+  --interval <SECS>                 更新间隔秒，最小 1 (DDNS_INTERVAL, 默认 300)
+  -c, --config <PATH>               配置文件路径 (默认 config.json)
+  -h, --help                        显示此帮助
+
+优先级: 命令行参数 > 环境变量 > config.json > 默认值
+"#
+    .to_string()
+}
+
+fn parse_args() -> Args {
+    let mut args = Args {
+        access_key_id: None,
+        access_key_secret: None,
+        domain: None,
+        rr: None,
+        ipv: None,
+        interface: None,
+        interval: None,
+        config: "config.json".into(),
+    };
+    let mut it = env::args().skip(1);
+    while let Some(a) = it.next() {
+        if a == "-h" || a == "--help" {
+            print!("{}", usage());
+            std::process::exit(0);
+        } else if let Some(rest) = a.strip_prefix("--") {
+            let (k, inline_v) = match rest.split_once('=') {
+                Some((k, v)) => (k, Some(v)),
+                None => (rest, None),
+            };
+            let mut v = inline_v.map(|s| s.to_string());
+            if v.is_none() {
+                v = it.next();
+            }
+            let v = match v {
+                Some(x) => x,
+                None => {
+                    eprintln!("选项 --{k} 缺少值");
+                    std::process::exit(2);
+                }
+            };
+            match k {
+                "access-key-id" => args.access_key_id = Some(v),
+                "access-key-secret" => args.access_key_secret = Some(v),
+                "domain" => args.domain = Some(v),
+                "rr" => args.rr = Some(v),
+                "ipv" => args.ipv = Some(v),
+                "interface" => args.interface = Some(v),
+                "interval" => match v.parse::<u64>() {
+                    Ok(n) => args.interval = Some(n),
+                    Err(_) => {
+                        eprintln!("--interval 必须是正整数: {v}");
+                        std::process::exit(2);
+                    }
+                },
+                "config" => args.config = v,
+                _ => {
+                    eprintln!("未知选项: --{k}");
+                    std::process::exit(2);
+                }
+            }
+        } else if let Some(rest) = a.strip_prefix('-') {
+            match rest {
+                "c" => {
+                    let v = it.next().unwrap_or_else(|| {
+                        eprintln!("选项 -c 缺少值");
+                        std::process::exit(2);
+                    });
+                    args.config = v;
+                }
+                "h" => {
+                    print!("{}", usage());
+                    std::process::exit(0);
+                }
+                _ => {
+                    eprintln!("未知选项: -{rest}");
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            eprintln!("非法参数: {a}");
+            std::process::exit(2);
+        }
+    }
+    args
 }
 
 #[derive(Deserialize, Default)]
@@ -82,6 +156,20 @@ fn default_interval() -> u64 {
     300
 }
 
+/// 三级优先级取值: 命令行参数 > 环境变量(非空) > 配置文件; 末尾兜底默认值
+///
+/// 把配置解析的契约集中在一点, 新增/修改取值来源时只需改这里, 避免六处各自复制导致分叉。
+fn resolve(
+    arg: Option<String>,
+    var: &str,
+    file: String,
+    fallback: impl FnOnce() -> String,
+) -> String {
+    arg.or_else(|| env::var(var).ok().filter(|s| !s.is_empty()))
+        .unwrap_or(file)
+        .if_empty(fallback)
+}
+
 impl Config {
     fn from_args(args: &Args) -> Self {
         // 从config.json加载基础配置
@@ -92,52 +180,38 @@ impl Config {
 
         // 优先级: 命令行参数 > 环境变量 > config.json > 默认值
         Self {
-            AccessKeyID: args
-                .access_key_id
-                .clone()
-                .or_else(|| {
-                    env::var("ALIBABA_CLOUD_ACCESS_KEY_ID")
-                        .ok()
-                        .filter(|v| !v.is_empty())
-                })
-                .unwrap_or(file_config.AccessKeyID),
-            AccessKeySecret: args
-                .access_key_secret
-                .clone()
-                .or_else(|| {
-                    env::var("ALIBABA_CLOUD_ACCESS_KEY_SECRET")
-                        .ok()
-                        .filter(|v| !v.is_empty())
-                })
-                .unwrap_or(file_config.AccessKeySecret),
-            DomainName: args
-                .domain
-                .clone()
-                .or_else(|| env::var("ALIDNS_DOMAIN").ok().filter(|v| !v.is_empty()))
-                .unwrap_or(file_config.DomainName),
-            RR: args
-                .rr
-                .clone()
-                .or_else(|| env::var("ALIDNS_RR").ok().filter(|v| !v.is_empty()))
-                .unwrap_or(file_config.RR)
-                .if_empty(|| "@".into()),
-            IPv: args
-                .ipv
-                .clone()
-                .or_else(|| env::var("DDNS_IPV").ok().filter(|v| !v.is_empty()))
-                .unwrap_or(file_config.IPv)
-                .if_empty(|| "4".into()),
+            AccessKeyID: resolve(
+                args.access_key_id.clone(),
+                "ALIBABA_CLOUD_ACCESS_KEY_ID",
+                file_config.AccessKeyID,
+                String::new,
+            ),
+            AccessKeySecret: resolve(
+                args.access_key_secret.clone(),
+                "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
+                file_config.AccessKeySecret,
+                String::new,
+            ),
+            DomainName: resolve(
+                args.domain.clone(),
+                "ALIDNS_DOMAIN",
+                file_config.DomainName,
+                String::new,
+            ),
+            RR: resolve(args.rr.clone(), "ALIDNS_RR", file_config.RR, default_rr),
+            IPv: resolve(args.ipv.clone(), "DDNS_IPV", file_config.IPv, default_ipv),
+            // Interval 为 u64(需解析 + 下限保护), 不符合字符串取值契约, 保留内联
             Interval: args
                 .interval
                 .or_else(|| env::var("DDNS_INTERVAL").ok().and_then(|v| v.parse().ok()))
                 .unwrap_or(file_config.Interval)
                 .max(1),
-            Interface: args
-                .interface
-                .clone()
-                .or_else(|| env::var("ALIDNS_INTERFACE").ok().filter(|v| !v.is_empty()))
-                .unwrap_or(file_config.Interface)
-                .if_empty(String::new),
+            Interface: resolve(
+                args.interface.clone(),
+                "ALIDNS_INTERFACE",
+                file_config.Interface,
+                String::new,
+            ),
         }
     }
 }
@@ -154,6 +228,77 @@ impl StringExt for String {
             self
         }
     }
+}
+
+fn rfc3339_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let days = (secs / 86_400) as i64;
+    let sec_of_day = (secs % 86_400) as i32;
+    let hour = sec_of_day / 3600;
+    let minute = (sec_of_day % 3600) / 60;
+    let second = sec_of_day % 60;
+    // Howard Hinnant 的 civil 日期算法（days since 1970-01-01 -> y/m/d）
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year, m, d, hour, minute, second
+    )
+}
+
+fn make_nonce() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    format!(
+        "{:x}-{:x}-{:x}",
+        nanos,
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+        std::process::id()
+    )
+}
+
+const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+
+fn hex_encode(data: &[u8]) -> String {
+    let mut s = String::with_capacity(data.len() * 2);
+    for &b in data {
+        s.push(HEX_DIGITS[(b >> 4) as usize] as char);
+        s.push(HEX_DIGITS[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
+fn percent_encode(s: &str) -> String {
+    // RFC3986: 保留 A-Za-z0-9-_.~ 不编码，其余按 UTF-8 字节编码
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => {
+                out.push('%');
+                out.push(HEX_DIGITS[(b >> 4) as usize] as char);
+                out.push(HEX_DIGITS[(b & 0x0f) as usize] as char);
+            }
+        }
+    }
+    out
 }
 
 #[derive(Deserialize)]
@@ -184,13 +329,15 @@ struct Record {
 }
 
 fn get_ipv4() -> String {
-    Client::new()
-        .get("https://api.ipify.org?format=json")
-        .send()
-        .ok()
-        .and_then(|r| r.json::<IpResponse>().ok())
-        .map(|r| r.ip)
-        .unwrap_or_default()
+    match ureq::get("https://api.ipify.org?format=json").call() {
+        Ok(resp) => resp
+            .into_string()
+            .ok()
+            .and_then(|s| serde_json::from_str::<IpResponse>(&s).ok())
+            .map(|r| r.ip)
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
 }
 
 fn get_ipv6(interface: Option<&str>) -> String {
@@ -234,15 +381,14 @@ fn get_ipv6(interface: Option<&str>) -> String {
     }
 }
 
-fn sha256_hex(data: &[u8]) -> String {
-    hex::encode(Sha256::digest(data))
-}
+/// 空 body 的 SHA-256：GET 请求无负载，为已知常量，避免每轮重复计算
+const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 fn api_call(config: &Config, action: &str, params: BTreeMap<String, String>) -> String {
     let host = "alidns.aliyuncs.com";
-    let nonce = uuid::Uuid::new_v4().to_string();
-    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let payload_hash = sha256_hex(b"");
+    let nonce = make_nonce();
+    let ts = rfc3339_now();
+    let payload_hash = EMPTY_SHA256;
 
     let mut headers: BTreeMap<String, String> = BTreeMap::new();
     headers.insert("host".into(), host.into());
@@ -250,11 +396,11 @@ fn api_call(config: &Config, action: &str, params: BTreeMap<String, String>) -> 
     headers.insert("x-acs-version".into(), "2015-01-09".into());
     headers.insert("x-acs-date".into(), ts);
     headers.insert("x-acs-signature-nonce".into(), nonce);
-    headers.insert("x-acs-content-sha256".into(), payload_hash.clone());
+    headers.insert("x-acs-content-sha256".into(), payload_hash.to_string());
 
     let canonical_query = params
         .iter()
-        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
         .collect::<Vec<_>>()
         .join("&");
 
@@ -271,13 +417,19 @@ fn api_call(config: &Config, action: &str, params: BTreeMap<String, String>) -> 
         "GET\n/\n{}\n{}\n{}\n{}",
         canonical_query, canonical_headers, signed_headers_str, payload_hash
     );
-    let hashed_canonical = sha256_hex(canonical_request.as_bytes());
+    let hashed_canonical = hex_encode(&sha256_hex(canonical_request.as_bytes()));
     let string_to_sign = format!("ACS3-HMAC-SHA256\n{}", hashed_canonical);
 
-    let mut mac = Hmac::<Sha256>::new_from_slice(config.AccessKeySecret.as_bytes())
-        .expect("HMAC key creation failed");
+    let mut mac = match Hmac::<Sha256>::new_from_slice(config.AccessKeySecret.as_bytes()) {
+        Ok(mac) => mac,
+        Err(_) => {
+            eprintln!("错误: AccessKeySecret 长度非法（HMAC-SHA256 密钥上限 64 字节）");
+            std::process::exit(1);
+        }
+    };
     mac.update(string_to_sign.as_bytes());
-    let signature = hex::encode(mac.finalize().into_bytes());
+    let sig = mac.finalize().into_bytes();
+    let signature = hex_encode(&sig);
 
     let authorization = format!(
         "ACS3-HMAC-SHA256 Credential={},SignedHeaders={},Signature={}",
@@ -286,38 +438,32 @@ fn api_call(config: &Config, action: &str, params: BTreeMap<String, String>) -> 
     headers.insert("Authorization".into(), authorization);
 
     let url = format!("https://{}/?{}", host, canonical_query);
-    let req = Client::new().get(&url);
-    let req = headers
-        .iter()
-        .fold(req, |r, (k, v)| r.header(k.as_str(), v.as_str()));
-    match req.send() {
+    let mut req = ureq::get(&url);
+    for (k, v) in &headers {
+        req = req.set(k.as_str(), v.as_str());
+    }
+    match req.call() {
         Ok(resp) => {
-            let status = resp.status();
-            match resp.text() {
-                Ok(body) => {
-                    if !status.is_success() {
-                        eprintln!("API错误 [{}]: {}", status, &body[..body.len().min(200)]);
-                    }
-                    body
-                }
+            let body = match resp.into_string() {
+                Ok(b) => b,
                 Err(e) => {
                     eprintln!("读取响应失败: {}", e);
                     String::new()
                 }
-            }
+            };
+            body
         }
-        Err(e) => {
-            eprintln!("请求失败: {}", e);
+        Err(ureq::Error::Status(code, resp)) => {
+            let body = resp.into_string().unwrap_or_default();
+            eprintln!("API错误 [{}]: {}", code, &body[..body.len().min(200)]);
             String::new()
         }
+        Err(_) => String::new(),
     }
 }
 
-#[derive(Deserialize)]
-#[allow(non_snake_case)]
-struct ApiError {
-    Code: Option<String>,
-    Message: Option<String>,
+fn sha256_hex(data: &[u8]) -> Vec<u8> {
+    Sha256::digest(data).to_vec()
 }
 
 fn update_dns(config: &Config, ip: &str, record_type: &str) {
@@ -389,24 +535,36 @@ fn check_api_response(resp: &str, action: &str) {
         eprintln!("{}记录失败: 无响应", action);
         return;
     }
-    if let Ok(err) = serde_json::from_str::<ApiError>(resp) {
-        if let Some(code) = err.Code {
-            eprintln!(
-                "{}记录失败: {} - {}",
-                action,
-                code,
-                err.Message.unwrap_or_default()
-            );
-        } else {
-            println!("{}记录成功", action);
+    // 阿里云：成功响应为不含 Code 字段的 JSON 对象，错误响应带 Code+Message。
+    // 仅当确认为"已知成功结构"时才报成功，避免把截断/非标准报文谎报为成功。
+    match serde_json::from_str::<serde_json::Value>(resp) {
+        Ok(serde_json::Value::Object(map)) if map.contains_key("Code") => {
+            let code = map.get("Code").and_then(|v| v.as_str()).unwrap_or("");
+            let msg = map
+                .get("Message")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            eprintln!("{}记录失败: {} - {}", action, code, msg);
         }
-    } else {
-        println!("{}记录成功", action);
+        Ok(serde_json::Value::Object(_)) => println!("{}记录成功", action),
+        Ok(_) => eprintln!("{}记录: 未识别的响应结构，视为失败以待重试", action),
+        Err(_) => eprintln!(
+            "{}记录: 响应无法解析（{}），视为失败以待重试",
+            action,
+            &resp[..resp.len().min(120)]
+        ),
     }
 }
 
+#[derive(Deserialize)]
+#[allow(non_snake_case)]
+struct ApiError {
+    Code: Option<String>,
+    Message: Option<String>,
+}
+
 fn main() {
-    let args = Args::parse();
+    let args = parse_args();
     let c = Config::from_args(&args);
 
     if c.AccessKeyID.is_empty() || c.AccessKeySecret.is_empty() || c.DomainName.is_empty() {
@@ -415,27 +573,28 @@ fn main() {
         std::process::exit(1);
     }
 
+    // IP 模式必须至少包含 4 或 6，否则无意义且会静默空转
+    let want_v4 = c.IPv.contains('4');
+    let want_v6 = c.IPv.contains('6');
+    if !want_v4 && !want_v6 {
+        eprintln!("错误: --ipv 模式无效（需包含 4 和/或 6）: {}", c.IPv);
+        std::process::exit(1);
+    }
+
+    let iface_name = if c.Interface.is_empty() {
+        "自动"
+    } else {
+        c.Interface.as_str()
+    };
     println!(
         "域名: {}.{} | IP模式: {} | 间隔: {}s | 网卡: {}",
-        c.RR,
-        c.DomainName,
-        c.IPv,
-        c.Interval,
-        if c.Interface.is_empty() {
-            "自动".into()
-        } else {
-            c.Interface.clone()
-        }
+        c.RR, c.DomainName, c.IPv, c.Interval, iface_name
     );
 
     loop {
         let (v4, v6) = (
-            if c.IPv.contains('4') {
-                get_ipv4()
-            } else {
-                String::new()
-            },
-            if c.IPv.contains('6') {
+            if want_v4 { get_ipv4() } else { String::new() },
+            if want_v6 {
                 get_ipv6(Some(c.Interface.as_str()))
             } else {
                 String::new()
@@ -443,10 +602,10 @@ fn main() {
         );
         println!("IPv4: {} | IPv6: {}", v4, v6);
 
-        if c.IPv.contains('4') {
+        if want_v4 {
             update_dns(&c, &v4, "A");
         }
-        if c.IPv.contains('6') {
+        if want_v6 {
             update_dns(&c, &v6, "AAAA");
         }
 

@@ -7,12 +7,12 @@
 > **⚠️ 第三方实现 | Third-Party Implementation**
 > 本项目为社区维护的第三方工具，**非**阿里云官方项目。与阿里云 DNS 服务的 API 交互基于公开文档实现。
 
-轻量级阿里云 DDNS 工具。**专注阿里云 DNS**，单文件 Rust 实现（~400 行），自动获取公网 IP 并更新解析记录。
+轻量级阿里云 DDNS 工具。**专注阿里云 DNS**，单文件 Rust 实现（~614 行），自动获取公网 IP 并更新解析记录。
 
 ## 功能特性
 
 - **仅支持阿里云 DNS** — 专注单一服务商，API 调用精简高效
-- **极致精简** — 单文件 ~400 行 Rust 代码，无多余抽象，编译后二进制约 1MB
+- **依赖极简** — 仅 ureq / serde / sha2 / hmac / local-ip-address 等少量依赖，无 tokio、无异步运行时，编译后二进制约 1.8MB，upx 压缩后约 900KB
 - 自动检测公网 IPv4（通过 [ipify](https://www.ipify.org/)）和 IPv6（本地网卡）
 - 支持 A (IPv4) / AAAA (IPv6) / 双栈模式
 - 三种配置方式：命令行参数、环境变量、配置文件
@@ -102,6 +102,7 @@ sudo journalctl -u alidns-ddns -f
 | `--rr` | `ALIDNS_RR` | 主机记录（如 `@`、`www`、`api`） | `@` |
 | `--ipv` | `DDNS_IPV` | IP 模式：`4`=仅IPv4 / `6`=仅IPv6 / `46`=双栈 | `4` |
 | `--interval` | `DDNS_INTERVAL` | 更新间隔（秒），最小 1 | `300` |
+| `--interface` | `ALIDNS_INTERFACE` | 指定网卡以获取本地 IPv6（留空自动搜索） | 空（自动搜索） |
 | `-c, --config` | — | 配置文件路径 | `config.json` |
 
 ### 配置示例
@@ -167,7 +168,7 @@ sudo journalctl -u alidns-ddns -f
 
 ```
 alidns-ddns/
-├── src/main.rs           # 主程序（单文件，~400 行）
+├── src/main.rs           # 主程序（单文件，~614 行）
 ├── Cargo.toml            # 项目配置
 ├── config.example.json   # 配置文件模板
 ├── env.example           # 环境变量模板
