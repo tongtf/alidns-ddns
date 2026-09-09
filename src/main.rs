@@ -40,6 +40,10 @@ struct Args {
     #[arg(long, env = "DDNS_IPV")]
     ipv: Option<String>,
 
+    /// 网卡名称（用于获取本地IP，如 eth0）；不存在时自动搜索并告警
+    #[arg(long, env = "ALIDNS_INTERFACE")]
+    interface: Option<String>,
+
     /// 更新间隔（秒）
     #[arg(long, env = "DDNS_INTERVAL")]
     interval: Option<u64>,
@@ -64,6 +68,8 @@ struct Config {
     IPv: String,
     #[serde(default = "default_interval")]
     Interval: u64,
+    #[serde(default)]
+    Interface: String,
 }
 
 fn default_rr() -> String {
@@ -126,6 +132,12 @@ impl Config {
                 .or_else(|| env::var("DDNS_INTERVAL").ok().and_then(|v| v.parse().ok()))
                 .unwrap_or(file_config.Interval)
                 .max(1),
+            Interface: args
+                .interface
+                .clone()
+                .or_else(|| env::var("ALIDNS_INTERFACE").ok().filter(|v| !v.is_empty()))
+                .unwrap_or(file_config.Interface)
+                .if_empty(String::new)
         }
     }
 }
@@ -181,14 +193,48 @@ fn get_ipv4() -> String {
         .unwrap_or_default()
 }
 
-fn get_ipv6() -> String {
-    local_ip_address::list_afinet_netifas()
-        .ok()
-        .and_then(|a| {
-            a.into_iter()
+fn get_ipv6(interface: Option<&str>) -> String {
+    match local_ip_address::list_afinet_netifas() {
+        Ok(netifs) => {
+            // 指定网卡时先精确匹配，未命中则告警并回退自动搜索
+            if let Some(iface) = interface.filter(|s| !s.is_empty()) {
+                let mut found = false;
+                let mut matched: Option<String> = None;
+                for (name, ip) in &netifs {
+                    if name.as_str() != iface {
+                        continue;
+                    }
+                    found = true;
+                    if ip.is_ipv6() && !ip.is_loopback() {
+                        matched = Some(ip.to_string());
+                        break;
+                    }
+                }
+                if let Some(ip) = matched {
+                    return ip;
+                }
+                if found {
+                    eprintln!(
+                        "⚠️ 警告: 网卡 \"{}\" 未获取到IPv6地址，自动搜索可用网卡。",
+                        iface
+                    );
+                } else {
+                    eprintln!(
+                        "⚠️ 警告: 指定网卡 \"{}\" 不存在，自动搜索可用网卡。",
+                        iface
+                    );
+                }
+            }
+            netifs
+                .into_iter()
                 .find_map(|(_, ip)| (ip.is_ipv6() && !ip.is_loopback()).then(|| ip.to_string()))
-        })
-        .unwrap_or_default()
+                .unwrap_or_default()
+        }
+        Err(e) => {
+            eprintln!("获取本地网络地址失败: {}", e);
+            String::new()
+        }
+    }
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -373,8 +419,16 @@ fn main() {
     }
 
     println!(
-        "域名: {}.{} | IP模式: {} | 间隔: {}s",
-        c.RR, c.DomainName, c.IPv, c.Interval
+        "域名: {}.{} | IP模式: {} | 间隔: {}s | 网卡: {}",
+        c.RR,
+        c.DomainName,
+        c.IPv,
+        c.Interval,
+        if c.Interface.is_empty() {
+            "自动".into()
+        } else {
+            c.Interface.clone()
+        }
     );
 
     loop {
@@ -385,7 +439,7 @@ fn main() {
                 String::new()
             },
             if c.IPv.contains('6') {
-                get_ipv6()
+                get_ipv6(Some(c.Interface.as_str()))
             } else {
                 String::new()
             },
