@@ -364,7 +364,7 @@ fn is_global_ipv6(ip: &IpAddr) -> bool {
                 && !is_link_local_v6(&o)
                 && !is_ula_v6(&o)
                 && !o.iter().all(|&b| b == 0) // 未指定 ::
-                && !v6.is_loopback()          // ::1
+                && !v6.is_loopback() // ::1
         }
         _ => false,
     }
