@@ -19,7 +19,7 @@ DDNS_IPV（4/6/46，默认 4）
 DDNS_INTERVAL（秒，默认 300，最小 1）
 ALIDNS_INTERFACE（网卡名，如 eth0，默认自动搜索；不存在时 warning 并回退）
 
-> 网卡选择仅用于本地 IPv6 获取（IPv4 走 api.ipify.org 外部服务，不涉及本地网卡）。指定网卡不存在或未取到 IPv6 时，打印 warning 并自动搜索可用网卡。
+> 网卡选择仅用于本地 IPv6 获取（IPv4 走 api.ipify.org 外部服务，不涉及本地网卡）。选取 IPv6 时**优先全局可路由地址，不存在时兜底 ULA（fc00::/7）**；回环与 fe80 链接本地地址公网不可达，一律排除。指定网卡存在但未取到可用 IPv6 时，打印 warning 并自动搜索可用网卡。
 
 # 配置文件路径
 ./alidns-ddns -c /path/to/config.json    # 默认 ./config.json
@@ -43,6 +43,8 @@ upx --best target/release/alidns-ddns  # 可选压缩
 3. IP 变化时自动更新 / 新建 A / AAAA 记录
 
 API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `AccessKeySecret`（不附加 `&`）。参数通过 HTTP Header（`Authorization`/`x-acs-*`）传递，非 Query 参数。
+
+> 签名时查询串与头部的百分号编码必须使用**大写十六进制**（如 `%3A`），与阿里云规范化要求一致；签名字节 / 哈希则用小写。大小写混用会导致 `Specified signature does not match our calculation`。
 
 ## 注意事项
 

@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs;
+use std::net::IpAddr;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -283,8 +284,11 @@ fn hex_encode(data: &[u8]) -> String {
     s
 }
 
+// URL 百分号编码使用大写十六进制（如 %3A），与阿里云规范化要求一致。
+const PERCENT_HEX: &[u8; 16] = b"0123456789ABCDEF";
+
 fn percent_encode(s: &str) -> String {
-    // RFC3986: 保留 A-Za-z0-9-_.~ 不编码，其余按 UTF-8 字节编码
+    // RFC3986: 保留 A-Za-z0-9-_.~ 不编码，其余按 UTF-8 字节大写编码
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {
@@ -293,8 +297,8 @@ fn percent_encode(s: &str) -> String {
             }
             _ => {
                 out.push('%');
-                out.push(HEX_DIGITS[(b >> 4) as usize] as char);
-                out.push(HEX_DIGITS[(b & 0x0f) as usize] as char);
+                out.push(PERCENT_HEX[(b >> 4) as usize] as char);
+                out.push(PERCENT_HEX[(b & 0x0f) as usize] as char);
             }
         }
     }
@@ -340,39 +344,72 @@ fn get_ipv4() -> String {
     }
 }
 
+/// 链接本地地址 fe80::/10：仅本链路可达、公网不可达，DDNS 不得采用。
+fn is_link_local_v6(octets: &[u8; 16]) -> bool {
+    octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80
+}
+
+/// ULA 私有地址 fc00::/7（RFC 4193）。
+fn is_ula_v6(octets: &[u8; 16]) -> bool {
+    (octets[0] & 0xfe) == 0xfc
+}
+
+/// 是否为全局可路由的公网 IPv6（DDNS 首选）。排除 multicast、链接本地、
+/// ULA、未指定与回环等公网不可达地址。
+fn is_global_ipv6(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V6(v6) => {
+            let o = v6.octets();
+            o[0] != 0xff
+                && !is_link_local_v6(&o)
+                && !is_ula_v6(&o)
+                && !o.iter().all(|&b| b == 0) // 未指定 ::
+                && !v6.is_loopback()          // ::1
+        }
+        _ => false,
+    }
+}
+
+/// 是否为 ULA 私有地址（fc00::/7），仅作为兜底：当不存在全局地址时才采用。
+fn is_ula_ipv6(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V6(v6) => is_ula_v6(&v6.octets()),
+        _ => false,
+    }
+}
+
+/// 从一组地址中挑选 IPv6：优先全局可路由的公网地址；缺失时兜底 ULA 私有地址。
+fn select_ipv6(addrs: &[IpAddr]) -> Option<String> {
+    addrs
+        .iter()
+        .find(|ip| is_global_ipv6(ip))
+        .or_else(|| addrs.iter().find(|ip| is_ula_ipv6(ip)))
+        .map(|ip| ip.to_string())
+}
+
 fn get_ipv6(interface: Option<&str>) -> String {
     match local_ip_address::list_afinet_netifas() {
         Ok(netifs) => {
             // 指定网卡时先精确匹配，未命中则告警并回退自动搜索
             if let Some(iface) = interface.filter(|s| !s.is_empty()) {
-                let mut found = false;
-                let mut matched: Option<String> = None;
-                for (name, ip) in &netifs {
-                    if name.as_str() != iface {
-                        continue;
-                    }
-                    found = true;
-                    if ip.is_ipv6() && !ip.is_loopback() {
-                        matched = Some(ip.to_string());
-                        break;
-                    }
-                }
-                if let Some(ip) = matched {
+                let matched: Vec<IpAddr> = netifs
+                    .iter()
+                    .filter(|(name, _)| name == iface)
+                    .map(|(_, ip)| *ip)
+                    .collect();
+                if matched.is_empty() {
+                    eprintln!("⚠️ 警告: 指定网卡 \"{}\" 不存在，自动搜索可用网卡。", iface);
+                } else if let Some(ip) = select_ipv6(&matched) {
                     return ip;
-                }
-                if found {
+                } else {
                     eprintln!(
-                        "⚠️ 警告: 网卡 \"{}\" 未获取到IPv6地址，自动搜索可用网卡。",
+                        "⚠️ 警告: 网卡 \"{}\" 仅存在回环/链接本地地址，自动搜索可用网卡。",
                         iface
                     );
-                } else {
-                    eprintln!("⚠️ 警告: 指定网卡 \"{}\" 不存在，自动搜索可用网卡。", iface);
                 }
             }
-            netifs
-                .into_iter()
-                .find_map(|(_, ip)| (ip.is_ipv6() && !ip.is_loopback()).then(|| ip.to_string()))
-                .unwrap_or_default()
+            let all: Vec<IpAddr> = netifs.iter().map(|(_, ip)| *ip).collect();
+            select_ipv6(&all).unwrap_or_default()
         }
         Err(e) => {
             eprintln!("获取本地网络地址失败: {}", e);

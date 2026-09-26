@@ -14,6 +14,7 @@
 - **仅支持阿里云 DNS** — 专注单一服务商，API 调用精简高效
 - **依赖极简** — 仅 ureq / serde / sha2 / hmac / local-ip-address 等少量依赖，无 tokio、无异步运行时，编译后二进制约 1.8MB，upx 压缩后约 900KB
 - 自动检测公网 IPv4（通过 [ipify](https://www.ipify.org/)）和 IPv6（本地网卡）
+- **IPv6 优先选取全局可路由地址**，仅在不存在时兜底 ULA（`fc00::/7`），绝不采用 fe80 链接本地地址
 - 支持 A (IPv4) / AAAA (IPv6) / 双栈模式
 - 三种配置方式：命令行参数、环境变量、配置文件
 - 配置优先级：CLI > 环境变量 > 配置文件 > 默认值
@@ -159,7 +160,7 @@ sudo journalctl -u alidns-ddns -f
 ```
 
 1. 每隔 N 秒，通过 [ipify API](https://api.ipify.org/) 获取当前公网 IPv4 地址
-2. 通过本地网卡枚举获取 IPv6 地址（使用 [`local-ip-address`](https://crates.io/crates/local-ip-address)）
+2. 通过本地网卡枚举获取 IPv6 地址（使用 [`local-ip-address`](https://crates.io/crates/local-ip-address)），**优先选取全局可路由地址，仅在不存在时兜底 ULA**；排除回环与 fe80 链接本地地址（公网不可达）
 3. 调用阿里云 DNS API（`DescribeDomainRecords`）查询现有记录
 4. 对比 IP 是否变化，变化时调用 `UpdateDomainRecord` 或 `AddDomainRecord` 更新
 5. API 认证采用 ACS3-HMAC-SHA256 签名（阿里云 V3 签名机制）
