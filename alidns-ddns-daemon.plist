@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tongtf.alidns-ddns</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@INSTALL_DIR@/alidns-ddns</string>
+        <string>--config</string>
+        <string>@CONFIG_DIR@/config.json</string>
+    </array>
+
+    <!-- 以普通用户运行，避免 DDNS 进程持有 root 权限 -->
+    <key>UserName</key>
+    <string>@USERNAME@</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>@LOG_DIR@/alidns-ddns.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>@LOG_DIR@/alidns-ddns.log</string>
+</dict>
+</plist>

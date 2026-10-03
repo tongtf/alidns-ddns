@@ -38,7 +38,7 @@ upx --best target/release/alidns-ddns  # 可选压缩
 
 ## 关键行为
 
-1. 每 N 秒获取 IPv4（`api.ipify.org`）和 IPv6（本地网卡，`local-ip-address` 库）
+1. 每 N 秒获取 IPv4（多端点回退：`api.ipify.org` → `v4.ident.me` → `ip.3322.net` → `ipv4.icanhazip.com` → `checkip.amazonaws.com`，单请求 8s 超时；ipify 在大陆网络常不可达，故需回退）和 IPv6（本地网卡，`local-ip-address` 库）
 2. 调用阿里云 DNS API（`DescribeDomainRecords`/`UpdateDomainRecord`/`AddDomainRecord`）
 3. IP 变化时自动更新 / 新建 A / AAAA 记录
 
@@ -51,4 +51,9 @@ API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `Access
 - `config.json` 含占位凭证，**勿提交真实 Key 到仓库**
 - 需要阿里云 DNS 管理权限（`alidns:*`）
 - 不要使用子用户 AccessKey
-- systemd 服务：`alidns-ddns.service` + `EnvironmentFile=/etc/alidns-ddns/env`
+- 服务部署按 OS 分发（`install.sh` 用 `uname -s` 检测）：
+  - Linux：systemd `alidns-ddns.service` + `EnvironmentFile=/etc/alidns-ddns/env`，需 root
+  - macOS：launchd 两种模式（`install.sh` 按是否 root 分发，模板均含 `@INSTALL_DIR@`/`@CONFIG_DIR@`/`@LOG_DIR@` 占位符，sed 生成）：
+    - root（`sudo ./install.sh`）→ 系统级 LaunchDaemon `alidns-ddns-daemon.plist`（另含 `@USERNAME@`）装到 `/Library/LaunchDaemons/`，`UserName=$SUDO_USER`，配置 `/etc/alidns-ddns/config.json`，日志 `/usr/local/var/log/alidns-ddns.log`，Label `system/com.tongtf.alidns-ddns`；**不依赖登录会话，开机即启**，并会清掉用户级残留避免双实例
+    - 普通用户 → LaunchAgent `alidns-ddns.plist` 装到 `~/Library/LaunchAgents/`，配置 `~/.config/alidns-ddns/config.json`，日志 `~/Library/Logs/alidns-ddns.log`；域探测 `launchctl print gui/$UID` 成功用 gui，否则回退 user；**模板必须带 `LimitLoadToSessionType` 数组 `[Aqua, Background]`**——默认值 Aqua 在 SSH/无图形会话下 bootstrap 会报 `Bootstrap failed: 5`，仅 Background 又会在图形登录时报 134 拒载
+  - macOS 下载不依赖 sudo 的普通用户模式时若已存在系统级 plist 会直接报错退出（防双实例）；`cargo build` 一律以 `SUDO_USER` 身份执行（root 无 cargo，且避免 target/ 属主变 root）

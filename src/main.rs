@@ -332,16 +332,35 @@ struct Record {
     Type: String,
 }
 
+/// IPv4 探测端点：按顺序回退，任一可用即可。
+/// api.ipify.org 在部分网络（如中国大陆）不可达，故提供多个备选；
+/// 优先使用仅含 A 记录的域名，确保连接走 IPv4、返回的就是公网 IPv4。
+const IPV4_ENDPOINTS: &[&str] = &[
+    "https://api.ipify.org?format=json",
+    "https://v4.ident.me",
+    "https://ip.3322.net",
+    "https://ipv4.icanhazip.com",
+    "https://checkip.amazonaws.com",
+];
+
 fn get_ipv4() -> String {
-    match ureq::get("https://api.ipify.org?format=json").call() {
-        Ok(resp) => resp
-            .into_string()
-            .ok()
-            .and_then(|s| serde_json::from_str::<IpResponse>(&s).ok())
+    for url in IPV4_ENDPOINTS {
+        let Ok(resp) = ureq::get(url).timeout(Duration::from_secs(8)).call() else {
+            continue;
+        };
+        let Ok(body) = resp.into_string() else {
+            continue;
+        };
+        let body = body.trim();
+        // 兼容 JSON（{"ip":"..."}）与纯文本两种响应
+        let ip = serde_json::from_str::<IpResponse>(body)
             .map(|r| r.ip)
-            .unwrap_or_default(),
-        Err(_) => String::new(),
+            .unwrap_or_else(|_| body.to_string());
+        if ip.parse::<std::net::Ipv4Addr>().is_ok() {
+            return ip;
+        }
     }
+    String::new()
 }
 
 /// 链接本地地址 fe80::/10：仅本链路可达、公网不可达，DDNS 不得采用。
@@ -475,7 +494,7 @@ fn api_call(config: &Config, action: &str, params: BTreeMap<String, String>) -> 
     headers.insert("Authorization".into(), authorization);
 
     let url = format!("https://{}/?{}", host, canonical_query);
-    let mut req = ureq::get(&url);
+    let mut req = ureq::get(&url).timeout(Duration::from_secs(10));
     for (k, v) in &headers {
         req = req.set(k.as_str(), v.as_str());
     }
@@ -516,6 +535,12 @@ fn update_dns(config: &Config, ip: &str, record_type: &str) {
             "RRKeyWord" => &config.RR,
         },
     );
+
+    // 网络失败/超时返回空串，直接跳过本轮，避免后续 JSON 解析报 EOF 噪音
+    if resp.is_empty() {
+        eprintln!("查询{}记录失败: 无响应，下轮重试", record_type);
+        return;
+    }
 
     // 检查API错误
     if let Ok(err) = serde_json::from_str::<ApiError>(&resp) {

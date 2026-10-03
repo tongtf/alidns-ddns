@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tongtf.alidns-ddns</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@INSTALL_DIR@/alidns-ddns</string>
+        <string>--config</string>
+        <string>@CONFIG_DIR@/config.json</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+
+    <!-- 默认值为 Aqua（仅图形会话），SSH/无图形会话下 bootstrap 会报
+         "Bootstrap failed: 5: Input/output error"；显式允许两种会话类型 -->
+    <key>LimitLoadToSessionType</key>
+    <array>
+        <string>Aqua</string>
+        <string>Background</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>StandardOutPath</key>
+    <string>@LOG_DIR@/alidns-ddns.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>@LOG_DIR@/alidns-ddns.log</string>
+</dict>
+</plist>

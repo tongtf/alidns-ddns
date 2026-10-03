@@ -13,13 +13,14 @@
 
 - **仅支持阿里云 DNS** — 专注单一服务商，API 调用精简高效
 - **依赖极简** — 仅 ureq / serde / sha2 / hmac / local-ip-address 等少量依赖，无 tokio、无异步运行时，编译后二进制约 1.8MB，upx 压缩后约 900KB
-- 自动检测公网 IPv4（通过 [ipify](https://www.ipify.org/)）和 IPv6（本地网卡）
+- 自动检测公网 IPv4（ipify 等多端点回退，适配大陆网络）和 IPv6（本地网卡）
 - **IPv6 优先选取全局可路由地址**，仅在不存在时兜底 ULA（`fc00::/7`），绝不采用 fe80 链接本地地址
 - 支持 A (IPv4) / AAAA (IPv6) / 双栈模式
 - 三种配置方式：命令行参数、环境变量、配置文件
 - 配置优先级：CLI > 环境变量 > 配置文件 > 默认值
 - ACS3-HMAC-SHA256 V3 签名认证
-- systemd 服务支持，开机自启
+- 服务支持：Linux systemd / macOS launchd，开机自启
+- 支持 Linux（x86_64 / ARM64）与 macOS（Intel / Apple Silicon）
 - 零运行时依赖，单二进制部署
 
 ## 前置准备
@@ -83,7 +84,11 @@ cp config.example.json config.json
 ./alidns-ddns -c config.json
 ```
 
-### systemd 部署
+### 服务部署
+
+`install.sh` 自动检测操作系统（Linux → systemd，macOS → launchd）。
+
+**Linux (systemd):**
 
 ```bash
 sudo ./install.sh
@@ -92,6 +97,37 @@ sudo systemctl start alidns-ddns
 sudo systemctl enable alidns-ddns
 sudo journalctl -u alidns-ddns -f
 ```
+
+**macOS (launchd) — 推荐系统级服务（开机即启，不依赖图形登录）:**
+
+```bash
+sudo ./install.sh                                # 编译 + 安装 + 开机自启（以当前用户身份运行）
+sudo vim /etc/alidns-ddns/config.json            # 填入 AccessKey
+sudo launchctl kickstart -k system/com.tongtf.alidns-ddns   # 重启生效
+tail -f /usr/local/var/log/alidns-ddns.log        # 查看日志
+
+# 卸载
+sudo launchctl bootout system/com.tongtf.alidns-ddns
+sudo rm /Library/LaunchDaemons/com.tongtf.alidns-ddns.plist
+```
+
+也可用免 sudo 的用户级服务（`./install.sh`，SSH 下可安装，图形登录后自动加载）：
+
+```bash
+./install.sh                                     # 装到 ~/.local/bin，配置 ~/.config/alidns-ddns
+launchctl kickstart -k user/$(id -u)/com.tongtf.alidns-ddns
+tail -f ~/Library/Logs/alidns-ddns.log
+
+# 卸载
+launchctl bootout user/$(id -u)/com.tongtf.alidns-ddns
+rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
+```
+
+> 无图形会话时 `gui/$(id -u)` 域不可用，服务会加载到 `user/$(id -u)`；`install.sh` 自动选择并打印实际使用的域。两种模式互斥，已有系统级服务时会拒绝用户级安装（避免双实例）。
+
+安装位置（macOS）：系统级 — 二进制 `/usr/local/bin/alidns-ddns`、配置 `/etc/alidns-ddns/config.json`、日志 `/usr/local/var/log/alidns-ddns.log`；用户级 — `~/.local/bin/alidns-ddns`、`~/.config/alidns-ddns/config.json`、`~/Library/Logs/alidns-ddns.log`。
+
+> IPv6 网卡名 macOS 为 `en0`/`en1`（`--interface en0`），Linux 多为 `eth0`/`enpXsY`；留空自动搜索。
 
 ## 配置说明
 
@@ -159,7 +195,7 @@ sudo journalctl -u alidns-ddns -f
 └─────────────┘
 ```
 
-1. 每隔 N 秒，通过 [ipify API](https://api.ipify.org/) 获取当前公网 IPv4 地址
+1. 每隔 N 秒，通过公网 IP 探测端点获取当前 IPv4：先试 [ipify](https://api.ipify.org/)，不可达时依次回退 `v4.ident.me` → `ip.3322.net` → `ipv4.icanhazip.com` → `checkip.amazonaws.com`（单请求 8 秒超时）
 2. 通过本地网卡枚举获取 IPv6 地址（使用 [`local-ip-address`](https://crates.io/crates/local-ip-address)），**优先选取全局可路由地址，仅在不存在时兜底 ULA**；排除回环与 fe80 链接本地地址（公网不可达）
 3. 调用阿里云 DNS API（`DescribeDomainRecords`）查询现有记录
 4. 对比 IP 是否变化，变化时调用 `UpdateDomainRecord` 或 `AddDomainRecord` 更新
@@ -173,8 +209,10 @@ alidns-ddns/
 ├── Cargo.toml            # 项目配置
 ├── config.example.json   # 配置文件模板
 ├── env.example           # 环境变量模板
-├── alidns-ddns.service   # systemd 服务文件
-├── install.sh            # 安装脚本
+├── alidns-ddns.service   # systemd 服务文件（Linux）
+├── alidns-ddns.plist     # launchd 用户级服务模板（macOS，install.sh sed 填充路径）
+├── alidns-ddns-daemon.plist  # launchd 系统级服务模板（macOS，sudo 安装）
+├── install.sh            # 安装脚本（自动检测 Linux / macOS，root/普通用户分模式）
 ├── LICENSE               # Apache-2.0 许可证
 ├── CONTRIBUTING.md       # 贡献指南
 └── SECURITY.md           # 安全策略
@@ -184,7 +222,7 @@ alidns-ddns/
 
 - **切勿**将包含真实 AccessKey 的 `config.json` 提交到版本控制
 - 推荐使用 RAM 子账号，仅授予 `AliyunDNSFullAccess` 权限
-- 生产环境建议使用 `EnvironmentFile` 管理凭证
+- 生产环境 Linux 建议使用 `EnvironmentFile` 管理凭证；macOS 使用 `~/.config/alidns-ddns/config.json` 并保持 `chmod 600`
 
 ## 贡献
 
