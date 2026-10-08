@@ -37,11 +37,11 @@ fn usage() -> String {
 选项:
   --access-key-id <ID>              AccessKey ID (环境变量 ALIBABA_CLOUD_ACCESS_KEY_ID)
   --access-key-secret <SECRET>      AccessKey Secret (环境变量 ALIBABA_CLOUD_ACCESS_KEY_SECRET)
-  --domain <DOMAIN>                 域名，如 example.com (ALIDNS_DOMAIN)
-  --rr <RR>                         主机记录，如 @、www (ALIDNS_RR, 默认 @)
-  --ipv <MODE>                      IP 模式: 4 / 6 / 46 (DDNS_IPV, 默认 4)
+  --domain <DOMAIN>                 域名，如 example.com，多个用逗号分隔 (ALIDNS_DOMAIN)
+  --rr <RR>                         主机记录，如 @、www，多个用逗号分隔 (ALIDNS_RR, 默认 @)
+  --ipv <MODE>                      IP 模式: 4 / 6 / 46 (DDNS_IPV, 默认 6)
   --interface <NAME>                网卡名，用于获取 IPv6 (ALIDNS_INTERFACE, 自动搜索)
-  --interval <SECS>                 更新间隔秒，最小 1 (DDNS_INTERVAL, 默认 300)
+  --interval <SECS>                 更新间隔秒，最小 1 (DDNS_INTERVAL, 默认 3600)
   -c, --config <PATH>               配置文件路径 (默认 config.json)
   -h, --help                        显示此帮助
 
@@ -151,10 +151,10 @@ fn default_rr() -> String {
     "@".into()
 }
 fn default_ipv() -> String {
-    "4".into()
+    "6".into()
 }
 fn default_interval() -> u64 {
-    300
+    3600
 }
 
 /// 三级优先级取值: 命令行参数 > 环境变量(非空) > 配置文件; 末尾兜底默认值
@@ -522,30 +522,36 @@ fn sha256_hex(data: &[u8]) -> Vec<u8> {
     Sha256::digest(data).to_vec()
 }
 
-fn update_dns(config: &Config, ip: &str, record_type: &str) {
+fn update_dns(config: &Config, domain: &str, rr: &str, ip: &str, record_type: &str) {
     if ip.is_empty() {
         return;
     }
 
+    let target = format!("{}.{}", rr, domain);
     let resp = api_call(
         config,
         "DescribeDomainRecords",
         map! {
-            "DomainName" => &config.DomainName,
-            "RRKeyWord" => &config.RR,
+            "DomainName" => domain,
+            "RRKeyWord" => rr,
         },
     );
 
     // 网络失败/超时返回空串，直接跳过本轮，避免后续 JSON 解析报 EOF 噪音
     if resp.is_empty() {
-        eprintln!("查询{}记录失败: 无响应，下轮重试", record_type);
+        eprintln!("{} 查询{}记录失败: 无响应，下轮重试", target, record_type);
         return;
     }
 
     // 检查API错误
     if let Ok(err) = serde_json::from_str::<ApiError>(&resp) {
         if let Some(code) = err.Code {
-            eprintln!("查询失败: {} - {}", code, err.Message.unwrap_or_default());
+            eprintln!(
+                "{} 查询失败: {} - {}",
+                target,
+                code,
+                err.Message.unwrap_or_default()
+            );
             return;
         }
     }
@@ -556,45 +562,45 @@ fn update_dns(config: &Config, ip: &str, record_type: &str) {
                 .DomainRecords
                 .Record
                 .iter()
-                .find(|r| r.RR == config.RR && r.Type == record_type)
+                .find(|r| r.RR == rr && r.Type == record_type)
             {
                 Some(r) if r.Value == ip => {
-                    println!("{}记录 {} 无需更新", record_type, ip);
+                    println!("{} {}记录 {} 无需更新", target, record_type, ip);
                 }
                 Some(r) => {
-                    println!("更新{}记录: {} -> {}", record_type, r.Value, ip);
+                    println!("{} 更新{}记录: {} -> {}", target, record_type, r.Value, ip);
                     let resp = api_call(
                         config,
                         "UpdateDomainRecord",
                         map! {
-                            "RecordId" => &r.RecordId, "RR" => &config.RR, "Value" => ip, "Type" => record_type,
+                            "RecordId" => &r.RecordId, "RR" => rr, "Value" => ip, "Type" => record_type,
                         },
                     );
-                    check_api_response(&resp, "更新");
+                    check_api_response(&resp, "更新", &target);
                 }
                 None => {
-                    println!("添加{}记录: {}", record_type, ip);
+                    println!("{} 添加{}记录: {}", target, record_type, ip);
                     let resp = api_call(
                         config,
                         "AddDomainRecord",
                         map! {
-                            "DomainName" => &config.DomainName, "RR" => &config.RR, "Value" => ip, "Type" => record_type,
+                            "DomainName" => domain, "RR" => rr, "Value" => ip, "Type" => record_type,
                         },
                     );
-                    check_api_response(&resp, "添加");
+                    check_api_response(&resp, "添加", &target);
                 }
             }
         }
         Err(e) => {
-            eprintln!("解析响应失败: {}", e);
+            eprintln!("{} 解析响应失败: {}", target, e);
             eprintln!("响应内容: {}", &resp[..resp.len().min(500)]);
         }
     }
 }
 
-fn check_api_response(resp: &str, action: &str) {
+fn check_api_response(resp: &str, action: &str, target: &str) {
     if resp.is_empty() {
-        eprintln!("{}记录失败: 无响应", action);
+        eprintln!("{} {}记录失败: 无响应", target, action);
         return;
     }
     // 阿里云：成功响应为不含 Code 字段的 JSON 对象，错误响应带 Code+Message。
@@ -606,12 +612,16 @@ fn check_api_response(resp: &str, action: &str) {
                 .get("Message")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
-            eprintln!("{}记录失败: {} - {}", action, code, msg);
+            eprintln!("{} {}记录失败: {} - {}", target, action, code, msg);
         }
-        Ok(serde_json::Value::Object(_)) => println!("{}记录成功", action),
-        Ok(_) => eprintln!("{}记录: 未识别的响应结构，视为失败以待重试", action),
+        Ok(serde_json::Value::Object(_)) => println!("{} {}记录成功", target, action),
+        Ok(_) => eprintln!(
+            "{} {}记录: 未识别的响应结构，视为失败以待重试",
+            target, action
+        ),
         Err(_) => eprintln!(
-            "{}记录: 响应无法解析（{}），视为失败以待重试",
+            "{} {}记录: 响应无法解析（{}），视为失败以待重试",
+            target,
             action,
             &resp[..resp.len().min(120)]
         ),
@@ -635,6 +645,56 @@ fn main() {
         std::process::exit(1);
     }
 
+    // 支持逗号分隔的多域名/多 RR：
+    //   domains = [a.com, b.com], rrs = [@]        -> @.a.com, @.b.com
+    //   domains = [a.com],        rrs = [@, www]   -> @.a.com, www.a.com
+    //   两者等长时逐一配对
+    let domains: Vec<&str> = c
+        .DomainName
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    let rrs: Vec<&str> =
+        c.RR.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+    if domains.is_empty() {
+        eprintln!("错误: DomainName 为空");
+        std::process::exit(1);
+    }
+    if rrs.is_empty() {
+        eprintln!("错误: RR 为空");
+        std::process::exit(1);
+    }
+    let targets: Vec<(&str, &str)> = if domains.len() == 1 && rrs.len() > 1 {
+        rrs.iter().map(|rr| (domains[0], *rr)).collect()
+    } else if rrs.len() == 1 {
+        domains.iter().map(|d| (*d, rrs[0])).collect()
+    } else if domains.len() == rrs.len() {
+        domains
+            .iter()
+            .zip(rrs.iter())
+            .map(|(d, r)| (*d, *r))
+            .collect()
+    } else {
+        eprintln!(
+            "错误: 域名数({})与 RR 数({})无法配对（需一对多、多对一或等长）",
+            domains.len(),
+            rrs.len()
+        );
+        std::process::exit(1);
+    };
+
+    // 去重（保持声明顺序），避免 --domain a.com,a.com 这类重复输入产生重复目标
+    let mut seen = std::collections::HashSet::new();
+    let targets: Vec<(&str, &str)> = targets.into_iter().filter(|t| seen.insert(*t)).collect();
+    if targets.is_empty() {
+        eprintln!("错误: 无有效的域名/RR 目标");
+        std::process::exit(1);
+    }
+
     // IP 模式必须至少包含 4 或 6，否则无意义且会静默空转
     let want_v4 = c.IPv.contains('4');
     let want_v6 = c.IPv.contains('6');
@@ -649,8 +709,15 @@ fn main() {
         c.Interface.as_str()
     };
     println!(
-        "域名: {}.{} | IP模式: {} | 间隔: {}s | 网卡: {}",
-        c.RR, c.DomainName, c.IPv, c.Interval, iface_name
+        "域名: {} | IP模式: {} | 间隔: {}s | 网卡: {}",
+        targets
+            .iter()
+            .map(|(d, r)| format!("{}.{}", r, d))
+            .collect::<Vec<_>>()
+            .join(", "),
+        c.IPv,
+        c.Interval,
+        iface_name
     );
 
     loop {
@@ -665,10 +732,14 @@ fn main() {
         println!("IPv4: {} | IPv6: {}", v4, v6);
 
         if want_v4 {
-            update_dns(&c, &v4, "A");
+            for (d, rr) in &targets {
+                update_dns(&c, d, rr, &v4, "A");
+            }
         }
         if want_v6 {
-            update_dns(&c, &v6, "AAAA");
+            for (d, rr) in &targets {
+                update_dns(&c, d, rr, &v6, "AAAA");
+            }
         }
 
         thread::sleep(Duration::from_secs(c.Interval));

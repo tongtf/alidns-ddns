@@ -12,11 +12,13 @@ CLI参数（clap） > 环境变量 > `config.json` > 默认值
 # CLI 参数（所有参数都支持 --env 从环境变量读取）
 ./alidns-ddns --access-key-id AKID --access-key-secret SECRET --domain example.com --rr @ --ipv 4 --interval 300
 
+支持逗号分隔的多域名/多 RR（`--domain a.com,b.com --rr @,www`），域名数与 RR 数一对多、多对一或等长时配对，统一解析到同一个获取的公网 IP。
+
 # 等价环境变量
 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET
 ALIDNS_DOMAIN / ALIDNS_RR（默认 @）
-DDNS_IPV（4/6/46，默认 4）
-DDNS_INTERVAL（秒，默认 300，最小 1）
+DDNS_IPV（4/6/46，默认 6）
+DDNS_INTERVAL（秒，默认 3600，最小 1）
 ALIDNS_INTERFACE（网卡名，如 eth0，默认自动搜索；不存在时 warning 并回退）
 
 > 网卡选择仅用于本地 IPv6 获取（IPv4 走 api.ipify.org 外部服务，不涉及本地网卡）。选取 IPv6 时**优先全局可路由地址，不存在时兜底 ULA（fc00::/7）**；回环与 fe80 链接本地地址公网不可达，一律排除。指定网卡存在但未取到可用 IPv6 时，打印 warning 并自动搜索可用网卡。

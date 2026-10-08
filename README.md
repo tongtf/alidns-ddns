@@ -135,10 +135,10 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
 |------|---------|------|--------|
 | `--access-key-id` | `ALIBABA_CLOUD_ACCESS_KEY_ID` | AccessKey ID | 必填 |
 | `--access-key-secret` | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | AccessKey Secret | 必填 |
-| `--domain` | `ALIDNS_DOMAIN` | 域名（如 `example.com`） | 必填 |
-| `--rr` | `ALIDNS_RR` | 主机记录（如 `@`、`www`、`api`） | `@` |
-| `--ipv` | `DDNS_IPV` | IP 模式：`4`=仅IPv4 / `6`=仅IPv6 / `46`=双栈 | `4` |
-| `--interval` | `DDNS_INTERVAL` | 更新间隔（秒），最小 1 | `300` |
+| `--domain` | `ALIDNS_DOMAIN` | 域名（如 `example.com`，多个用逗号分隔） | 必填 |
+| `--rr` | `ALIDNS_RR` | 主机记录（如 `@`、`www`，多个用逗号分隔） | `@` |
+| `--ipv` | `DDNS_IPV` | IP 模式：`4`=仅IPv4 / `6`=仅IPv6 / `46`=双栈 | `6` |
+| `--interval` | `DDNS_INTERVAL` | 更新间隔（秒），最小 1 | `3600` |
 | `--interface` | `ALIDNS_INTERFACE` | 指定网卡以获取本地 IPv6（留空自动搜索） | 空（自动搜索） |
 | `-c, --config` | — | 配置文件路径 | `config.json` |
 
@@ -160,6 +160,20 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
 
 效果：仅更新 `api.example.com` 的 AAAA 记录。
 
+**场景 4: 单进程维护多个域名（解析到同一个 IP）**
+
+```bash
+./alidns-ddns --domain example.com,example.net --rr @,www --ipv 46
+```
+
+或多个域名共用同一个 RR：
+
+```bash
+./alidns-ddns --domain example.com,example.net --rr @
+```
+
+效果：所有域名共享同一次公网 IP 探测结果，各自更新 / 新建对应的 A 与 AAAA 记录。域名数与 RR 数一对多、多对一或等长时自动配对，否则报错退出。
+
 **场景 3: 高频更新（最小间隔）**
 
 ```bash
@@ -176,8 +190,8 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
     "AccessKeySecret": "xxxxSecretxxxx",
     "DomainName": "example.com",
     "RR": "@",
-    "IPv": "46",
-    "Interval": 300
+    "IPv": "6",
+    "Interval": 3600
 }
 ```
 
