@@ -47,12 +47,15 @@ Linux)
 
     if [ ! -f "$CONFIG_DIR/config.json" ]; then
         cp config.example.json "$CONFIG_DIR/config.json"
-        chmod 600 "$CONFIG_DIR/config.json"
+        # 服务以 DynamicUser 的临时 UID 运行，config.json 必须 world-readable
+        # 才能被读取；真实 AccessKey 请放 /etc/alidns-ddns/env（600），勿写入此文件
+        chmod 644 "$CONFIG_DIR/config.json"
         echo "已复制配置文件到 $CONFIG_DIR/config.json"
     fi
 
     if [ ! -f "$CONFIG_DIR/env" ]; then
         cp env.example "$CONFIG_DIR/env"
+        chmod 600 "$CONFIG_DIR/env"
         echo "请编辑 $CONFIG_DIR/env 填入你的AccessKey"
     fi
 

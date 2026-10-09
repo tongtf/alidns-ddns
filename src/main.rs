@@ -174,10 +174,27 @@ fn resolve(
 impl Config {
     fn from_args(args: &Args) -> Self {
         // 从config.json加载基础配置
-        let file_config: Config = fs::read_to_string(&args.config)
-            .ok()
-            .and_then(|d| serde_json::from_str(&d).ok())
-            .unwrap_or_default();
+        // 三级优先级中它是最末一级，但读取失败必须显式暴露：systemd 下
+        // DynamicUser 以临时 UID 运行, 读不到 600/root 的 config.json 会静默
+        // 回退默认值, 表现为"env 配了 AK/SK 却提示缺 DomainName"。
+        let file_config: Config = match fs::read_to_string(&args.config) {
+            Ok(d) => match serde_json::from_str(&d) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("警告: 配置文件 {} 解析失败，忽略该文件: {}", args.config, e);
+                    Config::default()
+                }
+            },
+            // 文件本就不存在是正常情况（纯用 env/CLI 时），不告警
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(e) => {
+                eprintln!(
+                    "警告: 无法读取配置文件 {}（检查属主/权限，服务需能读取），本项回退默认值: {}",
+                    args.config, e
+                );
+                Config::default()
+            }
+        };
 
         // 优先级: 命令行参数 > 环境变量 > config.json > 默认值
         Self {
