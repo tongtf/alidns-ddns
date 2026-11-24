@@ -60,6 +60,30 @@
 
 ## 快速开始
 
+### 环境适配检测（可选，推荐先看一眼）
+
+`adapt-install.sh` 检测 OS / systemd 版本 / 是否容器 / 是否有 IPv6，自动选择最优方案并生成
+配置与启动脚本（**只生成，不安装、不启动、不写密钥**）：
+
+```bash
+./adapt-install.sh --dry-run                 # 只看检测结论
+./adapt-install.sh --output ./deploy         # 生成到 ./deploy
+./adapt-install.sh --output /etc/alidns-ddns --force   # 直接生成到目标目录（谨慎）
+```
+
+生成内容按环境不同：
+
+| 环境 | 启动脚本 | 凭证方式 |
+|---|---|---|
+| Linux + systemd ≥ 247 + systemd-creds ≥ 250 | `alidns-ddns.service`（`LoadCredentialEncrypted`） | 密文凭据文件 |
+| Linux + systemd ≥ 247 | `alidns-ddns.service`（`LoadCredential`） | 600 明文凭据文件 |
+| Linux + 旧 systemd | `alidns-ddns.service` + 显式 `DDNS_STATE_FILE` | `EnvironmentFile` |
+| Linux 无 systemd / 容器 | `run-alidns-ddns.sh`（前台，可交 runit/supervisord） | `EnvironmentFile` |
+| macOS | 已替换路径的 launchd plist（root/用户自动判断） | `EnvironmentFile` |
+
+生成后仍需编辑 `config.json` 填入 AK/SK 与域名；详细步骤见目录里的 `README.generated.txt`。
+容器环境会自动加 `--no-events`（netlink 多播常被禁）。
+
 ### 编译
 
 ```bash
