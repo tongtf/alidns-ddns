@@ -1,16 +1,14 @@
 {
-    "AccessKeyID": "your-access-key-id",
-    "AccessKeySecret": "your-access-key-secret",
-    "DomainName": "example.com",
-    "RR": "@",
-    "IPv": "6",
-    "Interval": 300,
-    "VerifyInterval": 21600,
-    "Ttl": 600,
-    "Line": "default",
-    "Ipv6Prefer": "auto",
-    "AllowUla": false,
-    "StateFile": "",
-    "OnChange": "",
-    "OnChangeTimeout": 60
+    "domain": "example.com",
+    "rr": "@",
+    "ipv": "46",
+    "interval": 300,
+    "verify_interval": 21600,
+    "ttl": 600,
+    "line": "default",
+    "ipv6_prefer": "auto",
+    "allow_ula": false,
+    "interface": "",
+    "on_change": "",
+    "on_change_timeout": 60
 }

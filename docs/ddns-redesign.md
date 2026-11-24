@@ -395,7 +395,7 @@ fn schedule(d: &Desired, s: &State, cfg: &Config) -> Duration {
 | `--verify-interval` | `DDNS_VERIFY_INTERVAL` | `VerifyInterval` | 21600 | 期望值未变时的 DNS 对账周期 |
 | `--ttl` | `DDNS_TTL` | `Ttl` | 600 | 写入 TTL |
 | `--line` | `DDNS_LINE` | `Line` | `default` | 记录线路 |
-| `--ipv6-prefer` | `ALIDNS_IPV6_PREFER` | `Ipv6Prefer` | `auto` | `auto`/`stable`/`temporary` |
+| `--ipv6-prefer` | `DDNS_IPV6_PREFER` | `ipv6_prefer` | `auto` | `auto`/`stable`/`temporary` |
 | `--allow-ula` | `DDNS_ALLOW_ULA` | `AllowUla` | false | 显式允许发布 ULA（默认拒绝） |
 | `--dry-run` | — | — | false | 只打印计划，不写 API |
 | `-v/--verbose` | `DDNS_VERBOSE` | — | false | 打印每个候选地址的判定过程 |
@@ -484,7 +484,8 @@ CapabilityBoundingSet=
 
 实现：`State::load/save_if_dirty` 把期望值缓存、连续失败数、变更时间、告警去重（24h TTL）、
 端点 URL 写入 `state.json`（`version` 字段 + 同目录临时文件 + `rename` 原子替换）。
-- 路径优先级：`--state-file` > `DDNS_STATE_FILE` > config `StateFile` > `$STATE_DIRECTORY/state.json` > XDG/HOME 兜底
+- 路径优先级：`--state-file` > `DDNS_STATE_FILE` > `$STATE_DIRECTORY/state.json` > XDG/HOME 兜底
+  （`StateFile` 已从 config.json 移除；部署项不进业务配置）
 - 单调钟 `Instant` 不能直接持久化：落盘用 Unix 秒，恢复时用 `Instant::now() - 间隔`；时钟回拨按"刚校验"处理，宁可多查一次也不永久跳过对账
 - systemd 单元加 `StateDirectory=alidns-ddns`，在 `DynamicUser` + `ProtectSystem=strict` 下获得可写私有目录
 - `--dry-run` 不写状态文件；常驻与 timer 共用同一状态，只能启用其中一种形态

@@ -145,19 +145,19 @@ pub fn usage() -> String {
 必填:
   --access-key-id <ID>            AccessKey ID      (ALIBABA_CLOUD_ACCESS_KEY_ID)
   --access-key-secret <SECRET>    AccessKey Secret  (ALIBABA_CLOUD_ACCESS_KEY_SECRET)
-  --domain <DOMAIN>               域名，多个用逗号分隔 (ALIDNS_DOMAIN)
+  --domain <DOMAIN>               域名，多个用逗号分隔 (DDNS_DOMAIN)
 
 基础:
-  --rr <RR>                       主机记录，多个用逗号分隔 (ALIDNS_RR, 默认 @)
+  --rr <RR>                       主机记录，多个用逗号分隔 (DDNS_RR, 默认 @)
   --ipv <MODE>                    IP 模式: 4 / 6 / 46 (DDNS_IPV, 默认 6)
-  --interface <NAME>              取 IPv6 的网卡名 (ALIDNS_INTERFACE, 默认自动)
+  --interface <NAME>              取 IPv6 的网卡名 (DDNS_INTERFACE, 默认自动)
   --line <LINE>                   解析线路 (DDNS_LINE, 默认 default)
   --ttl <SECS>                    记录 TTL (DDNS_TTL, 默认 600)
   --interval <SECS>               轮询间隔 (DDNS_INTERVAL, 默认 300)
   --verify-interval <SECS>        IP 未变时的 DNS 对账周期 (DDNS_VERIFY_INTERVAL, 默认 21600)
 
 IPv6 策略:
-  --ipv6-prefer <MODE>            auto / stable / temporary (ALIDNS_IPV6_PREFER, 默认 auto)
+  --ipv6-prefer <MODE>            auto / stable / temporary (DDNS_IPV6_PREFER, 默认 auto)
   --allow-ula                     允许把 ULA(fc00::/7) 写入 AAAA（默认拒绝）
   --no-events                     关闭 netlink 地址变更事件订阅（Linux）
   --state-file <PATH>             状态文件路径 (DDNS_STATE_FILE / config.json StateFile)
@@ -262,80 +262,38 @@ fn number<I: Iterator<Item = String>>(
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
-    #[serde(default, rename = "AccessKeyID")]
-    access_key_id: String,
-    #[serde(default, rename = "AccessKeySecret")]
-    access_key_secret: String,
-    #[serde(default, rename = "DomainName")]
-    domain_name: String,
-    #[serde(default, rename = "RR")]
+    domain: String,
     rr: String,
-    #[serde(default, rename = "IPv")]
     ipv: String,
-    #[serde(default, rename = "Interface")]
     interface: String,
-    #[serde(default, rename = "Line")]
     line: String,
-    #[serde(default, rename = "Ipv6Prefer")]
     ipv6_prefer: String,
-    #[serde(default, rename = "Interval")]
     interval: Option<u64>,
-    #[serde(default, rename = "VerifyInterval")]
     verify_interval: Option<u64>,
-    #[serde(default, rename = "Ttl")]
     ttl: Option<u64>,
-    #[serde(default, rename = "AllowUla")]
     allow_ula: bool,
-    #[serde(default, rename = "StateFile")]
-    state_file: String,
-    #[serde(default, rename = "OnChange")]
     on_change: String,
-    #[serde(default, rename = "OnChangeTimeout")]
     on_change_timeout: Option<u64>,
 }
 
-fn env_truthy(var: &str) -> bool {
-    matches!(
-        env::var(var)
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+/// 布尔覆盖：CLI 只能显式开启；环境变量可显式 true/false；都未设置才用文件/默认值。
+fn pick_bool(arg: bool, var: &str, from_file: bool) -> Result<bool, String> {
+    if arg {
+        return Ok(true);
+    }
+    match env::var(var) {
+        Ok(s) if !s.trim().is_empty() => match s.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" => Ok(false),
+            other => Err(format!("环境变量 {var} 需要 true/false，收到: {other}")),
+        },
+        _ => Ok(from_file),
+    }
 }
 
 fn pick(arg: Option<String>, var: &str, from_file: String) -> String {
     arg.filter(|s| !s.is_empty())
         .or_else(|| env::var(var).ok().filter(|s| !s.trim().is_empty()))
-        .unwrap_or(from_file)
-}
-
-/// 从 systemd `LoadCredential=` 注入的目录读取凭据文件（内容按行读取并 trim）。
-fn credential_from(dir: &str, name: &str) -> Option<String> {
-    let path = Path::new(dir).join(name);
-    fs::read_to_string(path)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn read_credential(name: &str) -> Option<String> {
-    let dir = env::var("CREDENTIALS_DIRECTORY").ok()?;
-    credential_from(dir.trim(), name)
-}
-
-/// 凭证优先级：CLI > LoadCredential 文件 > 环境变量 > config.json。
-/// 凭据文件由 systemd 以 root 读取并挂载，进程无需自己读 600 的源文件。
-fn pick_credential(arg: Option<String>, cred_name: &str, var: &str, from_file: String) -> String {
-    arg.filter(|s| !s.is_empty())
-        .or_else(|| read_credential(cred_name))
-        .or_else(|| {
-            env::var(var)
-                .ok()
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| s.trim().to_string())
-        })
         .unwrap_or(from_file)
 }
 
@@ -357,17 +315,38 @@ fn pick_u64(
     }
 }
 
+/// 从 systemd `LoadCredential=` 注入的目录读取凭据文件（内容按行读取并 trim）。
+fn credential_from(dir: &str, name: &str) -> Option<String> {
+    let path = Path::new(dir).join(name);
+    fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn read_credential(name: &str) -> Option<String> {
+    let dir = env::var("CREDENTIALS_DIRECTORY").ok()?;
+    credential_from(dir.trim(), name)
+}
+
+/// 凭证优先级：CLI > LoadCredential 文件 > 环境变量。
+/// 凭据文件由 systemd 以 root 读取并挂载，进程无需自己读 600 的源文件。
+fn credential(arg: Option<String>, cred_name: &str, var: &str) -> Option<String> {
+    arg.filter(|s| !s.is_empty())
+        .or_else(|| read_credential(cred_name))
+        .or_else(|| {
+            env::var(var)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+        })
+}
+
 pub fn from_args(args: &Args) -> Result<Config, String> {
     let mut warnings = Vec::new();
     let path = args.config.clone().unwrap_or_else(|| "config.json".into());
     let file = load_file(&path)?;
 
-    if !file.access_key_secret.trim().is_empty() {
-        warnings.push(format!(
-            "配置文件 {path} 中包含明文 AccessKeySecret；若该文件权限较宽（如 644），\
-             建议改用环境变量或 systemd LoadCredential 传递密钥"
-        ));
-    }
     if args.access_key_secret.is_some() {
         warnings.push(
             "--access-key-secret 会出现在 /proc/<pid>/cmdline，建议改用环境变量或 systemd LoadCredential"
@@ -375,21 +354,19 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         );
     }
 
-    let access_key_id = pick_credential(
+    let access_key_id = credential(
         args.access_key_id.clone(),
         "alidns-access-key-id",
         "ALIBABA_CLOUD_ACCESS_KEY_ID",
-        file.access_key_id,
     );
-    let access_key_secret = pick_credential(
+    let access_key_secret = credential(
         args.access_key_secret.clone(),
         "alidns-access-key-secret",
         "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
-        file.access_key_secret,
     );
-    let domain_raw = pick(args.domain.clone(), "ALIDNS_DOMAIN", file.domain_name);
-    let rr_raw = pick(args.rr.clone(), "ALIDNS_RR", file.rr);
-    let interface = pick(args.interface.clone(), "ALIDNS_INTERFACE", file.interface)
+    let domain_raw = pick(args.domain.clone(), "DDNS_DOMAIN", file.domain);
+    let rr_raw = pick(args.rr.clone(), "DDNS_RR", file.rr);
+    let interface = pick(args.interface.clone(), "DDNS_INTERFACE", file.interface)
         .trim()
         .to_string();
     let ipv = pick(args.ipv.clone(), "DDNS_IPV", file.ipv)
@@ -400,16 +377,21 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         .to_string();
     let prefer_raw = pick(
         args.ipv6_prefer.clone(),
-        "ALIDNS_IPV6_PREFER",
+        "DDNS_IPV6_PREFER",
         file.ipv6_prefer,
     );
 
-    if access_key_id.trim().is_empty()
-        || access_key_secret.trim().is_empty()
+    if access_key_id.as_deref().unwrap_or("").trim().is_empty()
+        || access_key_secret.as_deref().unwrap_or("").trim().is_empty()
         || domain_raw.trim().is_empty()
     {
-        return Err("缺少必填项: AccessKeyID / AccessKeySecret / DomainName".into());
+        return Err(
+            "缺少必填项: DomainName / AccessKeyID / AccessKeySecret（密钥请通过环境变量或 LoadCredential 提供）"
+                .into(),
+        );
     }
+    let access_key_id = access_key_id.unwrap();
+    let access_key_secret = access_key_secret.unwrap();
 
     let (want_v4, want_v6) = match ipv.as_str() {
         "" | "6" => (false, true),
@@ -476,14 +458,11 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
 
     let targets = expand_targets(&domain_raw, &rr_raw, &line, want_v4, want_v6)?;
 
-    let state_file = if args.no_state {
+    let no_state = args.no_state || pick_bool(false, "DDNS_NO_STATE", false)?;
+    let state_file = if no_state {
         None
     } else {
-        let raw = pick(
-            args.state_file.clone(),
-            "DDNS_STATE_FILE",
-            file.state_file.clone(),
-        );
+        let raw = pick(args.state_file.clone(), "DDNS_STATE_FILE", String::new());
         if raw.trim().is_empty() {
             default_state_path()
         } else {
@@ -503,10 +482,10 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         verify_interval,
         ttl,
         ipv6_prefer,
-        allow_ula: args.allow_ula || file.allow_ula || env_truthy("DDNS_ALLOW_ULA"),
+        allow_ula: pick_bool(args.allow_ula, "DDNS_ALLOW_ULA", file.allow_ula)?,
         dry_run: args.dry_run,
-        verbose: args.verbose || env_truthy("DDNS_VERBOSE"),
-        events: !args.no_events,
+        verbose: pick_bool(args.verbose, "DDNS_VERBOSE", false)?,
+        events: !pick_bool(args.no_events, "DDNS_NO_EVENTS", false)?,
         on_change: {
             let cmd = pick(
                 args.on_change.clone(),
@@ -551,6 +530,18 @@ fn default_state_path() -> Option<PathBuf> {
 fn load_file(path: &str) -> Result<FileConfig, String> {
     match fs::read_to_string(path) {
         Ok(data) => {
+            // 旧版键名直接给出迁移提示，而不是让用户面对 serde 的 unknown field
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&data) {
+                if let Some(obj) = value.as_object() {
+                    for old in ["AccessKeyID", "AccessKeySecret", "StateFile"] {
+                        if obj.contains_key(old) {
+                            return Err(format!(
+                                "配置文件 {path} 不再支持 {old}；密钥请用 ALIBABA_CLOUD_ACCESS_KEY_* 或 LoadCredential，状态文件请用 DDNS_STATE_FILE"
+                            ));
+                        }
+                    }
+                }
+            }
             serde_json::from_str(&data).map_err(|e| format!("配置文件 {path} 解析失败: {e}"))
         }
         // 文件不存在是正常情况（纯用 env/CLI 时），不报错
@@ -769,7 +760,7 @@ mod tests {
     fn unknown_config_key_fails_fast() {
         let dir =
             std::env::temp_dir().join(format!("alidns-unknown-key-{}.json", std::process::id()));
-        fs::write(&dir, r#"{"DomainName":"a.com","Intervall":60}"#).unwrap();
+        fs::write(&dir, r#"{"domain":"a.com","intervall":60}"#).unwrap();
         let args = Args {
             access_key_id: Some("id".into()),
             access_key_secret: Some("sk".into()),
@@ -778,6 +769,52 @@ mod tests {
         };
         assert!(from_args(&args).is_err());
         let _ = fs::remove_file(dir);
+    }
+
+    #[test]
+    fn old_config_keys_are_rejected_with_hint() {
+        let dir = std::env::temp_dir().join(format!("alidns-old-key-{}.json", std::process::id()));
+        fs::write(&dir, r#"{"AccessKeyID":"x","domain":"a.com"}"#).unwrap();
+        let args = Args {
+            config: Some(dir.to_str().unwrap().into()),
+            no_state: true,
+            ..Args::default()
+        };
+        let e = match from_args(&args) {
+            Ok(_) => panic!("旧键名应被拒绝"),
+            Err(e) => e,
+        };
+        assert!(e.contains("不再支持 AccessKeyID"), "{e}");
+        let _ = fs::remove_file(dir);
+    }
+
+    #[test]
+    fn bool_override_hierarchy() {
+        env::set_var("DDNS_TEST_BOOL_OVERRIDE", "false");
+        // 环境变量 false 覆盖文件 true
+        assert!(!pick_bool(false, "DDNS_TEST_BOOL_OVERRIDE", true).unwrap());
+        // CLI 开启优先级最高
+        assert!(pick_bool(true, "DDNS_TEST_BOOL_OVERRIDE", false).unwrap());
+        env::remove_var("DDNS_TEST_BOOL_OVERRIDE");
+
+        env::set_var("DDNS_TEST_BOOL_INVALID", "maybe");
+        assert!(pick_bool(false, "DDNS_TEST_BOOL_INVALID", false).is_err());
+        env::remove_var("DDNS_TEST_BOOL_INVALID");
+    }
+
+    #[test]
+    fn new_env_names_are_used() {
+        env::set_var("DDNS_DOMAIN", "env.example.com");
+        let args = Args {
+            access_key_id: Some("id".into()),
+            access_key_secret: Some("sk".into()),
+            config: Some("/nonexistent-alidns-config.json".into()),
+            no_state: true,
+            ..Args::default()
+        };
+        let cfg = from_args(&args).unwrap();
+        assert_eq!(cfg.targets[0].domain, "env.example.com");
+        env::remove_var("DDNS_DOMAIN");
     }
 
     #[test]

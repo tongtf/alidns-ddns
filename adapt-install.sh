@@ -189,34 +189,37 @@ mkdir -p "$OUTPUT_DIR"
 
 write_file "$OUTPUT_DIR/config.json" <<EOF
 {
-    "AccessKeyID": "",
-    "AccessKeySecret": "",
-    "DomainName": "",
-    "RR": "@",
-    "IPv": "$IPV_MODE",
-    "Interval": 300,
-    "VerifyInterval": 21600,
-    "Ttl": 600,
-    "Line": "default",
-    "Ipv6Prefer": "auto",
-    "AllowUla": false,
-    "StateFile": "$STATE_FILE",
-    "OnChange": "",
-    "OnChangeTimeout": 60
+    "domain": "",
+    "rr": "@",
+    "ipv": "$IPV_MODE",
+    "interval": 300,
+    "verify_interval": 21600,
+    "ttl": 600,
+    "line": "default",
+    "ipv6_prefer": "auto",
+    "allow_ula": false,
+    "interface": "",
+    "on_change": "",
+    "on_change_timeout": 60
 }
 EOF
 
+if [ "$PLAN" = systemd ] && [ "$SYSTEMD_VER" -ge 247 ]; then
+    STATE_LINE="# DDNS_STATE_FILE  # systemd StateDirectory 自动推导"
+else
+    STATE_LINE="DDNS_STATE_FILE=$STATE_FILE"
+fi
+
 write_file "$OUTPUT_DIR/env" <<EOF
 # 由 adapt-install.sh 生成（$OS / $PLAN / $CRED_MODE）
-# 只放非敏感设置；AK/SK 不要用本文件传递
-DDNS_IPV=$IPV_MODE
-DDNS_INTERVAL=300
-DDNS_VERIFY_INTERVAL=21600
-DDNS_TTL=600
-DDNS_LINE=default
-ALIDNS_IPV6_PREFER=auto
-# DDNS_ALLOW_ULA=false
-# DDNS_ON_CHANGE=/usr/local/bin/ddns-changed
+# 凭证（只放这里或 LoadCredential，不要写进 config.json）
+# ALIBABA_CLOUD_ACCESS_KEY_ID=
+# ALIBABA_CLOUD_ACCESS_KEY_SECRET=
+
+# 部署覆盖（可选）
+$STATE_LINE
+# DDNS_NO_EVENTS=0
+# DDNS_VERBOSE=0
 EOF
 chmod 600 "$OUTPUT_DIR/env" 2>/dev/null || true
 
@@ -275,8 +278,8 @@ write_file "$OUTPUT_DIR/README.generated.txt" <<EOF
 容器=$CONTAINER, IPv6=$HAS_IPV6, 方案=$PLAN, 凭证=$CRED_MODE。
 
 下一步（通用）：
-1) 编辑 config.json，填入 AccessKeyID / AccessKeySecret / DomainName。
-   若使用 LoadCredential，请把 AccessKeySecret 留空。
+1) 编辑 config.json，填入 domain（和需要的 rr / ipv 等）。
+   密钥不要写进 config.json，只从 env 或 LoadCredential 提供。
 2) 把生成的文件复制到目标位置（见下方对应方案）。
 
 systemd（$PLAN=systemd）：
@@ -287,7 +290,8 @@ systemd（$PLAN=systemd）：
   sudo systemctl enable --now alidns-ddns
 
 凭证（$CRED_MODE）：
-  envfile: 在 /etc/alidns-ddns/env 里加 ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET
+  envfile: 在 /etc/alidns-ddns/env 里填 ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET；
+           域名写在 config.json 的 domain 字段
   loadcredential:
     printf '%s' 'AKID' | sudo tee /etc/alidns-ddns/access_key_id >/dev/null
     printf '%s' 'SECRET' | sudo tee /etc/alidns-ddns/access_key_secret >/dev/null

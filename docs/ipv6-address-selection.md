@@ -444,7 +444,7 @@ T0+2d       : A 被内核删除              -> 无影响
 
 | CLI | 环境变量 | config.json | 默认 | 说明 |
 |---|---|---|---|---|
-| `--ipv6-prefer` | `ALIDNS_IPV6_PREFER` | `Ipv6Prefer` | `auto` | `auto` / `stable` / `temporary` |
+| `--ipv6-prefer` | `DDNS_IPV6_PREFER` | `ipv6_prefer` | `auto` | `auto` / `stable` / `temporary` |
 | ~~`--ipv6-settle`~~ | ~~`ALIDNS_IPV6_SETTLE`~~ | ~~`Ipv6Settle`~~ | — | **二期设想，未实现** |
 
 `--ipv6-prefer` 非法值 → 报错退出（与 `--interval` 一致的处理风格）。

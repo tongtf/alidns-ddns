@@ -105,12 +105,12 @@ cargo build --release
 # 方式 2: 环境变量
 export ALIBABA_CLOUD_ACCESS_KEY_ID="LTAI5xxxxxxx"
 export ALIBABA_CLOUD_ACCESS_KEY_SECRET="xxxxSecretxxxx"
-export ALIDNS_DOMAIN="example.com"
+export DDNS_DOMAIN="example.com"
 ./alidns-ddns
 
-# 方式 3: 配置文件
+# 方式 3: 配置文件 + 环境变量凭证
 cp config.example.json config.json
-# 编辑填入你的凭证
+# 编辑 config.json 填入 domain（密钥只放环境变量或 LoadCredential）
 ./alidns-ddns -c config.json
 ```
 
@@ -235,28 +235,42 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
 
 ## 配置说明
 
+## 配置说明
+
+配置文件只放**业务配置**，密钥不写入 `config.json`（出现旧键 `AccessKeyID` / `AccessKeySecret` / `StateFile` 会直接报错）。
+密钥只从环境变量 `ALIBABA_CLOUD_ACCESS_KEY_*` 或 systemd LoadCredential 提供；
+`env` 文件只放凭证和少量部署覆盖。
+
+> **升级到 2.0.2 的用户请注意**：本版本不做旧配置兼容。旧键名（`DomainName`、`RR`、`IPv`、
+> `Interval`、`Ipv6Prefer`、`StateFile`、`AccessKeyID` 等）与旧环境变量（`ALIDNS_DOMAIN`、
+> `ALIDNS_RR`、`ALIDNS_INTERFACE`、`ALIDNS_IPV6_PREFER`）会被直接拒绝。请按上面的新表改写
+> `config.json` 与 `env`；可用 `adapt-install.sh --dry-run` 先查看新格式。
+
 | 参数 | 环境变量 | config.json | 说明 | 默认值 |
 |------|---------|-------------|------|--------|
-| `--access-key-id` | `ALIBABA_CLOUD_ACCESS_KEY_ID` | `AccessKeyID` | AccessKey ID | 必填 |
-| `--access-key-secret` | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | `AccessKeySecret` | AccessKey Secret | 必填 |
-| `--domain` | `ALIDNS_DOMAIN` | `DomainName` | 域名（多个用逗号分隔） | 必填 |
-| `--rr` | `ALIDNS_RR` | `RR` | 主机记录（多个用逗号分隔） | `@` |
-| `--ipv` | `DDNS_IPV` | `IPv` | `4` / `6` / `46` | `6` |
-| `--interval` | `DDNS_INTERVAL` | `Interval` | 唤醒间隔（秒），1–2592000 | `300` |
-| `--verify-interval` | `DDNS_VERIFY_INTERVAL` | `VerifyInterval` | IP 未变时的 DNS 对账周期（秒） | `21600` |
-| `--ttl` | `DDNS_TTL` | `Ttl` | 写入记录的 TTL（秒） | `600` |
-| `--line` | `DDNS_LINE` | `Line` | 解析线路 | `default` |
-| `--interface` | `ALIDNS_INTERFACE` | `Interface` | 指定获取 IPv6 的网卡，留空自动 | 空 |
-| `--ipv6-prefer` | `ALIDNS_IPV6_PREFER` | `Ipv6Prefer` | `auto` / `stable` / `temporary` | `auto` |
-| `--allow-ula` | `DDNS_ALLOW_ULA` | `AllowUla` | 允许把 ULA 写进 AAAA（默认拒绝） | false |
-| `--state-file` | `DDNS_STATE_FILE` | `StateFile` | 状态文件路径 | `$STATE_DIRECTORY/state.json` 等 |
-| `--no-state` | — | — | 禁用状态持久化 | false |
-| `--on-change` | `DDNS_ON_CHANGE` | `OnChange` | IP 变更后执行的命令 | 无 |
-| `--on-change-timeout` | `DDNS_ON_CHANGE_TIMEOUT` | `OnChangeTimeout` | 钩子超时（秒），1–3600 | `60` |
-| `--no-events` | — | — | 关闭 Linux netlink 地址变更订阅 | false |
+| `--access-key-id` | `ALIBABA_CLOUD_ACCESS_KEY_ID` | —（不支持） | AccessKey ID，也可由 LoadCredential 提供 | 必填 |
+| `--access-key-secret` | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | —（不支持） | AccessKey Secret，也可由 LoadCredential 提供 | 必填 |
+| `--domain` | `DDNS_DOMAIN` | `domain` | 域名（多个用逗号分隔） | 必填 |
+| `--rr` | `DDNS_RR` | `rr` | 主机记录（多个用逗号分隔） | `@` |
+| `--ipv` | `DDNS_IPV` | `ipv` | `4` / `6` / `46` | `6` |
+| `--interval` | `DDNS_INTERVAL` | `interval` | 唤醒间隔（秒），1–2592000 | `300` |
+| `--verify-interval` | `DDNS_VERIFY_INTERVAL` | `verify_interval` | IP 未变时的 DNS 对账周期（秒） | `21600` |
+| `--ttl` | `DDNS_TTL` | `ttl` | 写入记录的 TTL（秒） | `600` |
+| `--line` | `DDNS_LINE` | `line` | 解析线路 | `default` |
+| `--interface` | `DDNS_INTERFACE` | `interface` | 指定获取 IPv6 的网卡，留空自动 | 空 |
+| `--ipv6-prefer` | `DDNS_IPV6_PREFER` | `ipv6_prefer` | `auto` / `stable` / `temporary` | `auto` |
+| `--allow-ula` | `DDNS_ALLOW_ULA` | `allow_ula` | 允许把 ULA 写进 AAAA；环境变量可显式 `false` 覆盖文件 | false |
+| `--state-file` | `DDNS_STATE_FILE` | —（不支持） | 状态文件路径（部署项） | `$STATE_DIRECTORY/state.json` 等 |
+| `--no-state` | `DDNS_NO_STATE` | — | 禁用状态持久化 | false |
+| `--on-change` | `DDNS_ON_CHANGE` | `on_change` | IP 变更后执行的命令 | 无 |
+| `--on-change-timeout` | `DDNS_ON_CHANGE_TIMEOUT` | `on_change_timeout` | 钩子超时（秒），1–3600 | `60` |
+| `--no-events` | `DDNS_NO_EVENTS` | — | 关闭 Linux netlink 地址变更订阅（部署项） | false |
 | `--dry-run` | — | — | 只打印计划，不写 API、不执行钩子、不写状态 | false |
 | `-v, --verbose` | `DDNS_VERBOSE` | — | 输出候选地址与判定细节 | false |
 | `-c, --config` | — | — | 配置文件路径 | `config.json` |
+
+优先级：**CLI > LoadCredential（仅密钥） > 环境变量 > config.json > 默认值**。
+布尔值支持三态：环境变量写 `false` 可以覆盖 `config.json` 里的 `true`；未设置才回退。
 
 配置解析失败会**快速失败并退出 78**（不再静默用默认值）；`config.json` 出现未知键
 （例如 `Intervall`）也会报错，避免拼写错误被无声忽略。systemd 配置
@@ -306,20 +320,18 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
 
 ```json
 {
-    "AccessKeyID": "LTAI5xxxxxxx",
-    "AccessKeySecret": "xxxxSecretxxxx",
-    "DomainName": "example.com",
-    "RR": "@",
-    "IPv": "6",
-    "Interval": 300,
-    "VerifyInterval": 21600,
-    "Ttl": 600,
-    "Line": "default",
-    "Ipv6Prefer": "auto",
-    "AllowUla": false,
-    "StateFile": "",
-    "OnChange": "",
-    "OnChangeTimeout": 60
+    "domain": "example.com",
+    "rr": "@",
+    "ipv": "46",
+    "interval": 300,
+    "verify_interval": 21600,
+    "ttl": 600,
+    "line": "default",
+    "ipv6_prefer": "auto",
+    "allow_ula": false,
+    "interface": "",
+    "on_change": "",
+    "on_change_timeout": 60
 }
 ```
 
