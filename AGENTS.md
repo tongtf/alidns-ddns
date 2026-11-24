@@ -99,7 +99,7 @@ API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `Access
 
 ## 注意事项
 
-- **环境适配**：新增/修改部署方式时同步维护 `adapt-install.sh`（按 OS/systemd/容器/IPv6 自动选方案；读取旧配置迁移为最新格式；自动把 AK/SK 转为 systemd 凭据或加密；`--apply` 可备份安装并重启），并更新 README 的对照表
+- **环境适配**：新增/修改部署方式时同步维护 `adapt-install.sh`（按 OS/systemd/容器/IPv6 自动选方案；读取旧配置迁移为最新格式；自动把 AK/SK 转为 systemd 凭据或加密；`--apply` 可备份安装并重启；模板缺失时回退已部署单元/plist；加密需 root 或免密 sudo），并更新 README 的对照表
 - **先分支后合并**：任何修改（尤其 bug 修复）都先新建分支，完成后通过 PR 合并回 `main`，不要直接提交 `main`
 - **默认不做 Release**：修 bug / 合并 PR 只提交代码，**不要**主动升版本、打 `v*` tag 或触发 Release 工作流。只有用户明确要求"发布/release/打 tag"时才执行
 - `config.json` 含占位凭证，**勿提交真实 Key 到仓库**

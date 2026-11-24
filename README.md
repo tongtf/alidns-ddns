@@ -78,11 +78,16 @@ sudo ./adapt-install.sh --apply --yes               # 直接备份旧文件、�
 `Ipv6Prefer`/`StateFile` 等自动映射到新格式；旧密钥从 env 或旧 JSON 读取后写入凭据文件。
 若读不到 AK/SK，凭证方式自动降级为 `EnvironmentFile` 并留占位符。
 
+加密凭据需要 root 读取 host key：脚本会尝试免密 `sudo -n systemd-creds ...`；
+若不可用，会明确提示并回退到 600 明文凭据文件（可用 `sudo ./adapt-install.sh ...` 重跑启用加密）。
+生成服务单元时，若脚本同目录没有 `alidns-ddns.service` 模板，会自动改用**已部署的单元文件**作为模板
+（macOS 同理回退到已安装的 plist），因此可以只把脚本单独拷到目标机使用。
+
 生成内容按环境不同：
 
 | 环境 | 启动脚本 | 凭证方式 |
 |---|---|---|
-| Linux + systemd ≥ 247 + systemd-creds ≥ 250 | `alidns-ddns.service`（`LoadCredentialEncrypted`） | 密文 `.cred` 文件 |
+| Linux + systemd ≥ 247 + systemd-creds ≥ 250 | `alidns-ddns.service`（`LoadCredentialEncrypted`） | 密文凭据文件 |
 | Linux + systemd ≥ 247 | `alidns-ddns.service`（`LoadCredential`） | 600 明文凭据文件 |
 | Linux + 旧 systemd | `alidns-ddns.service` + 显式 `DDNS_STATE_FILE` | `EnvironmentFile` |
 | Linux 无 systemd / 容器 | `run-alidns-ddns.sh`（前台，可交 runit/supervisord） | `EnvironmentFile` |
