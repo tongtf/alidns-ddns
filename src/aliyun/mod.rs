@@ -127,10 +127,7 @@ impl Client {
             })?;
 
             if let Some(code) = parsed.code.as_deref().filter(|c| !c.is_empty()) {
-                return Err(classify_code(
-                    code,
-                    parsed.message.as_deref().unwrap_or(""),
-                ));
+                return Err(classify_code(code, parsed.message.as_deref().unwrap_or("")));
             }
 
             let got = parsed.records.record.len() as u64;
@@ -153,7 +150,13 @@ impl Client {
         Ok(out)
     }
 
-    pub fn update(&self, target: &Target, record_id: &str, value: &str, ttl: u64) -> Result<(), ApiError> {
+    pub fn update(
+        &self,
+        target: &Target,
+        record_id: &str,
+        value: &str,
+        ttl: u64,
+    ) -> Result<(), ApiError> {
         let mut p = BTreeMap::new();
         p.insert("RecordId".to_string(), record_id.to_string());
         p.insert("RR".to_string(), target.rr.clone());
@@ -180,10 +183,9 @@ impl Client {
         match serde_json::from_str::<Ack>(&body) {
             Ok(ack) => match ack.code {
                 // HTTP 200 但带 Code，仍是错误
-                Some(code) if !code.is_empty() => Err(classify_code(
-                    &code,
-                    ack.message.as_deref().unwrap_or(""),
-                )),
+                Some(code) if !code.is_empty() => {
+                    Err(classify_code(&code, ack.message.as_deref().unwrap_or("")))
+                }
                 _ => {
                     if let Some(id) = ack.request_id {
                         log::debug(format!("{action} 成功, RequestId={id}"));

@@ -32,12 +32,7 @@ impl Http {
 ///
 /// 失败不写入空值，而是返回 `None`——调用方据此跳过对应类型的 DNS 更新，
 /// 保留旧记录（旧实现返回 `""`，会一路传到 API 参数里）。
-pub fn observe(
-    cfg: &Config,
-    http: &Http,
-    probe: &mut ipv4::Probe,
-    state: &mut State,
-) -> Desired {
+pub fn observe(cfg: &Config, http: &Http, probe: &mut ipv4::Probe, state: &mut State) -> Desired {
     let mut desired = Desired::default();
 
     if cfg.want_v4 {

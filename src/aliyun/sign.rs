@@ -83,9 +83,8 @@ pub fn sign(
     }
     let signed_headers = signed_headers.join(";");
 
-    let canonical_request = format!(
-        "GET\n/\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{EMPTY_SHA256}"
-    );
+    let canonical_request =
+        format!("GET\n/\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{EMPTY_SHA256}");
 
     let hashed_canonical = hex_lower(&Sha256::digest(canonical_request.as_bytes()));
     let string_to_sign = format!("ACS3-HMAC-SHA256\n{hashed_canonical}");
@@ -135,10 +134,24 @@ mod tests {
     #[test]
     fn signature_is_deterministic_and_well_formed() {
         let p = params();
-        let a = sign("DescribeDomainRecords", &p, "AKID", "SECRET", "2026-01-01T00:00:00Z", "n1")
-            .unwrap();
-        let b = sign("DescribeDomainRecords", &p, "AKID", "SECRET", "2026-01-01T00:00:00Z", "n1")
-            .unwrap();
+        let a = sign(
+            "DescribeDomainRecords",
+            &p,
+            "AKID",
+            "SECRET",
+            "2026-01-01T00:00:00Z",
+            "n1",
+        )
+        .unwrap();
+        let b = sign(
+            "DescribeDomainRecords",
+            &p,
+            "AKID",
+            "SECRET",
+            "2026-01-01T00:00:00Z",
+            "n1",
+        )
+        .unwrap();
         assert_eq!(a.url, b.url);
         assert_eq!(a.headers, b.headers);
 
@@ -156,7 +169,15 @@ mod tests {
 
     #[test]
     fn signed_headers_are_sorted() {
-        let s = sign("A", &params(), "AKID", "SECRET", "2026-01-01T00:00:00Z", "n").unwrap();
+        let s = sign(
+            "A",
+            &params(),
+            "AKID",
+            "SECRET",
+            "2026-01-01T00:00:00Z",
+            "n",
+        )
+        .unwrap();
         let auth = s
             .headers
             .iter()

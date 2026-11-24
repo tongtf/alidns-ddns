@@ -95,9 +95,7 @@ pub fn parse_ifconfig(text: &str) -> Result<Vec<V6Cand>, String> {
                 "pltime" => pltime = next.and_then(|s| s.parse::<u64>().ok()),
                 "vltime" => vltime = next.and_then(|s| s.parse::<u64>().ok()),
                 "scopeid" => {
-                    ifindex = next
-                        .and_then(|s| parse_scopeid(s))
-                        .unwrap_or(0);
+                    ifindex = next.and_then(|s| parse_scopeid(s)).unwrap_or(0);
                 }
                 _ => {}
             }
@@ -116,8 +114,8 @@ pub fn parse_ifconfig(text: &str) -> Result<Vec<V6Cand>, String> {
 
         // 手工配置的全局地址通常既没有 autoconf 也没有 temporary/dynamic；
         // 它等价于 Linux 的 IFA_F_PERMANENT，应在同桶排序中优先。
-        let permanent = has("permanent")
-            || (!has("autoconf") && !has("temporary") && !has("dynamic"));
+        let permanent =
+            has("permanent") || (!has("autoconf") && !has("temporary") && !has("dynamic"));
 
         out.push(V6Cand {
             ifindex,
@@ -239,7 +237,10 @@ en0: flags=8863<UP> mtu 1500\n\
     #[test]
     fn empty_or_malformed_output_is_an_error() {
         assert!(parse_ifconfig("").is_err());
-        assert!(parse_ifconfig("en0: flags=8863<UP> mtu 1500\n\tinet 1.2.3.4 netmask 0xffffff00\n").is_err());
+        assert!(parse_ifconfig(
+            "en0: flags=8863<UP> mtu 1500\n\tinet 1.2.3.4 netmask 0xffffff00\n"
+        )
+        .is_err());
     }
 
     #[test]

@@ -208,7 +208,10 @@ mod tests {
         let t = target("www", "telecom", RType::A);
         let others = record("www", "default", "A", "1.1.1.1");
         let steps = diff(&[&t], &desired(Some("2.2.2.2"), None), &[others], 600);
-        assert!(matches!(steps[0].kind, StepKind::Add { .. }), "线路不同应视为缺失");
+        assert!(
+            matches!(steps[0].kind, StepKind::Add { .. }),
+            "线路不同应视为缺失"
+        );
     }
 
     #[test]

@@ -248,9 +248,7 @@ fn value<I: Iterator<Item = String>>(
 ) -> Result<String, String> {
     match inline {
         Some(v) => Ok(v.to_string()),
-        None => it
-            .next()
-            .ok_or_else(|| format!("选项 --{k} 缺少值")),
+        None => it.next().ok_or_else(|| format!("选项 --{k} 缺少值")),
     }
 }
 
@@ -301,7 +299,11 @@ struct FileConfig {
 
 fn env_truthy(var: &str) -> bool {
     matches!(
-        env::var(var).unwrap_or_default().trim().to_ascii_lowercase().as_str(),
+        env::var(var)
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
         "1" | "true" | "yes" | "on"
     )
 }
@@ -342,9 +344,7 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         ));
     }
     if args.access_key_secret.is_some() {
-        warnings.push(
-            "--access-key-secret 会出现在 /proc/<pid>/cmdline，建议改用环境变量".into(),
-        );
+        warnings.push("--access-key-secret 会出现在 /proc/<pid>/cmdline，建议改用环境变量".into());
     }
 
     let access_key_id = pick(
@@ -362,8 +362,12 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
     let interface = pick(args.interface.clone(), "ALIDNS_INTERFACE", file.interface)
         .trim()
         .to_string();
-    let ipv = pick(args.ipv.clone(), "DDNS_IPV", file.ipv).trim().to_string();
-    let line = pick(args.line.clone(), "DDNS_LINE", file.line).trim().to_string();
+    let ipv = pick(args.ipv.clone(), "DDNS_IPV", file.ipv)
+        .trim()
+        .to_string();
+    let line = pick(args.line.clone(), "DDNS_LINE", file.line)
+        .trim()
+        .to_string();
     let prefer_raw = pick(
         args.ipv6_prefer.clone(),
         "ALIDNS_IPV6_PREFER",
@@ -400,7 +404,9 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         21_600,
     )?;
     if !(1..=31_536_000).contains(&verify_interval) {
-        return Err("--verify-interval 取值范围 1..31536000（1 年），收到: {verify_interval}".into());
+        return Err(
+            "--verify-interval 取值范围 1..31536000（1 年），收到: {verify_interval}".into(),
+        );
     }
     let ttl = pick_u64(args.ttl, "DDNS_TTL", file.ttl, 600)?;
     if !(1..=86_400).contains(&ttl) {
@@ -415,7 +421,11 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         })?
     };
 
-    let line = if line.is_empty() { "default".to_string() } else { line };
+    let line = if line.is_empty() {
+        "default".to_string()
+    } else {
+        line
+    };
     let rr_raw = if rr_raw.trim().is_empty() {
         "@".to_string()
     } else {
@@ -469,10 +479,18 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         verbose: args.verbose || env_truthy("DDNS_VERBOSE"),
         events: !args.no_events,
         on_change: {
-            let cmd = pick(args.on_change.clone(), "DDNS_ON_CHANGE", file.on_change.clone())
-                .trim()
-                .to_string();
-            if cmd.is_empty() { None } else { Some(cmd) }
+            let cmd = pick(
+                args.on_change.clone(),
+                "DDNS_ON_CHANGE",
+                file.on_change.clone(),
+            )
+            .trim()
+            .to_string();
+            if cmd.is_empty() {
+                None
+            } else {
+                Some(cmd)
+            }
         },
         on_change_timeout,
         state_file,
@@ -495,9 +513,7 @@ fn default_state_path() -> Option<PathBuf> {
     }
     if let Ok(home) = env::var("HOME") {
         if !home.trim().is_empty() {
-            return Some(
-                PathBuf::from(home.trim()).join(".local/state/alidns-ddns/state.json"),
-            );
+            return Some(PathBuf::from(home.trim()).join(".local/state/alidns-ddns/state.json"));
         }
     }
     None
@@ -505,8 +521,9 @@ fn default_state_path() -> Option<PathBuf> {
 
 fn load_file(path: &str) -> Result<FileConfig, String> {
     match fs::read_to_string(path) {
-        Ok(data) => serde_json::from_str(&data)
-            .map_err(|e| format!("配置文件 {path} 解析失败: {e}")),
+        Ok(data) => {
+            serde_json::from_str(&data).map_err(|e| format!("配置文件 {path} 解析失败: {e}"))
+        }
         // 文件不存在是正常情况（纯用 env/CLI 时），不报错
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(FileConfig::default()),
         Err(e) => Err(format!(
@@ -547,9 +564,14 @@ fn expand_targets(
     }
 
     let pairs: Vec<(String, String)> = if domains.len() == 1 && rrs.len() > 1 {
-        rrs.iter().map(|r| (domains[0].clone(), r.clone())).collect()
+        rrs.iter()
+            .map(|r| (domains[0].clone(), r.clone()))
+            .collect()
     } else if rrs.len() == 1 {
-        domains.iter().map(|d| (d.clone(), rrs[0].clone())).collect()
+        domains
+            .iter()
+            .map(|d| (d.clone(), rrs[0].clone()))
+            .collect()
     } else if domains.len() == rrs.len() {
         domains.iter().cloned().zip(rrs.iter().cloned()).collect()
     } else {
@@ -633,9 +655,7 @@ mod tests {
 
     #[test]
     fn flag_parsing_rejects_bad_number() {
-        let r = parse_args_from(
-            ["--interval", "abc"].into_iter().map(String::from),
-        );
+        let r = parse_args_from(["--interval", "abc"].into_iter().map(String::from));
         assert!(r.is_err());
     }
 

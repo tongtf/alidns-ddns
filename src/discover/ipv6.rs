@@ -240,9 +240,11 @@ pub fn spawn_change_watcher() -> Option<std::sync::mpsc::Receiver<()>> {
     let spawned = std::thread::Builder::new()
         .name("rtnl-event".into())
         .spawn(move || {
-            let Ok(sock) =
-                NlSocketHandle::connect(NlFamily::Route, None, Groups::new_bitmask(RTMGRP_IPV6_IFADDR))
-            else {
+            let Ok(sock) = NlSocketHandle::connect(
+                NlFamily::Route,
+                None,
+                Groups::new_bitmask(RTMGRP_IPV6_IFADDR),
+            ) else {
                 return;
             };
             loop {

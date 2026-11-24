@@ -48,10 +48,20 @@ pub fn run(h: &Hook<'_>) -> Result<(), String> {
         .env("DDNS_CHANGED_COUNT", h.changed.len().to_string())
         .env(
             "DDNS_CHANGED_TARGETS",
-            h.changed.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(","),
+            h.changed
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
         )
-        .env("DDNS_IPV4", h.desired.v4.map(|v| v.to_string()).unwrap_or_default())
-        .env("DDNS_IPV6", h.desired.v6.map(|v| v.to_string()).unwrap_or_default())
+        .env(
+            "DDNS_IPV4",
+            h.desired.v4.map(|v| v.to_string()).unwrap_or_default(),
+        )
+        .env(
+            "DDNS_IPV6",
+            h.desired.v6.map(|v| v.to_string()).unwrap_or_default(),
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 

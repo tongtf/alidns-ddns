@@ -185,9 +185,7 @@ fn better(a: &V6Cand, b: &V6Cand, kernel_pick: Option<Ipv6Addr>) -> Ordering {
         _ => {}
     }
     // 5) 确定性：ifindex 小者、地址小者优先
-    b.ifindex
-        .cmp(&a.ifindex)
-        .then_with(|| b.addr.cmp(&a.addr))
+    b.ifindex.cmp(&a.ifindex).then_with(|| b.addr.cmp(&a.addr))
 }
 
 pub fn select(cands: &[V6Cand], cfg: &Cfg, kernel_pick: Option<Ipv6Addr>) -> Option<Pick> {
@@ -214,7 +212,8 @@ pub fn select(cands: &[V6Cand], cfg: &Cfg, kernel_pick: Option<Ipv6Addr>) -> Opt
             Bucket::UlaStable | Bucket::UlaTemporary => {
                 if !cfg.allow_ula {
                     return Some(Pick::Refuse {
-                        reason: "仅存在 ULA 地址（fc00::/7），公网不可达；如确需写入请加 --allow-ula",
+                        reason:
+                            "仅存在 ULA 地址（fc00::/7），公网不可达；如确需写入请加 --allow-ula",
                     });
                 }
                 Some("使用 ULA 地址，公网不可达")
@@ -243,7 +242,11 @@ mod tests {
             state,
             usable: true,
             permanent: false,
-            preferred_lft: if state == V6State::Deprecated { 0 } else { 3600 },
+            preferred_lft: if state == V6State::Deprecated {
+                0
+            } else {
+                3600
+            },
             valid_lft: valid,
             cstamp,
         }
@@ -259,7 +262,13 @@ mod tests {
     #[test]
     fn stable_wins_over_temporary() {
         let set = [
-            cand("2408::aaaa", V6Kind::Temporary, V6State::Preferred, 200, 1000),
+            cand(
+                "2408::aaaa",
+                V6Kind::Temporary,
+                V6State::Preferred,
+                200,
+                1000,
+            ),
             cand("2408::bbbb", V6Kind::Stable, V6State::Preferred, 100, 1000),
         ];
         match select(&set, &cfg(), None).unwrap() {
@@ -286,8 +295,20 @@ mod tests {
     #[test]
     fn prefix_change_by_cstamp() {
         let set = [
-            cand("2408:1::1", V6Kind::Stable, V6State::Preferred, 100, 500_000),
-            cand("2408:2::1", V6Kind::Stable, V6State::Preferred, 900, 600_000),
+            cand(
+                "2408:1::1",
+                V6Kind::Stable,
+                V6State::Preferred,
+                100,
+                500_000,
+            ),
+            cand(
+                "2408:2::1",
+                V6Kind::Stable,
+                V6State::Preferred,
+                900,
+                600_000,
+            ),
         ];
         match select(&set, &cfg(), None).unwrap() {
             Pick::Use { addr, warn, .. } => {
@@ -302,7 +323,13 @@ mod tests {
     fn cstamp_wraparound() {
         // 旧地址 cstamp 接近 u32 上限，新地址刚回绕到 0
         let set = [
-            cand("2408:ffff::1", V6Kind::Stable, V6State::Preferred, u32::MAX - 5, 1000),
+            cand(
+                "2408:ffff::1",
+                V6Kind::Stable,
+                V6State::Preferred,
+                u32::MAX - 5,
+                1000,
+            ),
             cand("2408:1::1", V6Kind::Stable, V6State::Preferred, 5, 1000),
         ];
         match select(&set, &cfg(), None).unwrap() {
@@ -323,13 +350,19 @@ mod tests {
     #[test]
     fn ula_refused_by_default() {
         let set = [cand("fd00::1", V6Kind::Stable, V6State::Preferred, 1, 1000)];
-        assert!(matches!(select(&set, &cfg(), None).unwrap(), Pick::Refuse { .. }));
+        assert!(matches!(
+            select(&set, &cfg(), None).unwrap(),
+            Pick::Refuse { .. }
+        ));
     }
 
     #[test]
     fn ula_allowed_when_asked() {
         let set = [cand("fd00::1", V6Kind::Stable, V6State::Preferred, 1, 1000)];
-        let c = Cfg { prefer: V6Prefer::Auto, allow_ula: true };
+        let c = Cfg {
+            prefer: V6Prefer::Auto,
+            allow_ula: true,
+        };
         match select(&set, &c, None).unwrap() {
             Pick::Use { warn, .. } => assert!(warn.is_some()),
             other => panic!("{other:?}"),
@@ -363,7 +396,10 @@ mod tests {
             cand("2408::b", V6Kind::Temporary, V6State::Preferred, 200, 1000),
             cand("2408::a", V6Kind::Stable, V6State::Preferred, 100, 1000),
         ];
-        let c = Cfg { prefer: V6Prefer::Temporary, allow_ula: false };
+        let c = Cfg {
+            prefer: V6Prefer::Temporary,
+            allow_ula: false,
+        };
         match select(&set, &c, None).unwrap() {
             Pick::Use { addr, .. } => assert_eq!(addr, "2408::b".parse::<Ipv6Addr>().unwrap()),
             other => panic!("{other:?}"),
@@ -387,11 +423,21 @@ mod tests {
     /// 通常还带 IFA_F_PERMANENT。应正常选中，且无需生命周期提前复查。
     #[test]
     fn static_permanent_address() {
-        let mut c = cand("2001:df1:7880:100::4c3", V6Kind::Stable, V6State::Preferred, 1, u64::MAX);
+        let mut c = cand(
+            "2001:df1:7880:100::4c3",
+            V6Kind::Stable,
+            V6State::Preferred,
+            1,
+            u64::MAX,
+        );
         c.permanent = true;
         c.preferred_lft = u64::MAX;
         match select(&[c], &cfg(), None).unwrap() {
-            Pick::Use { addr, preferred_lft, warn } => {
+            Pick::Use {
+                addr,
+                preferred_lft,
+                warn,
+            } => {
                 assert_eq!(addr, "2001:df1:7880:100::4c3".parse::<Ipv6Addr>().unwrap());
                 assert_eq!(preferred_lft, u64::MAX);
                 assert!(warn.is_none());
@@ -403,9 +449,21 @@ mod tests {
     /// 静态地址即便 cstamp 更早，也优先于会过期的 SLAAC 地址。
     #[test]
     fn static_beats_dynamic_regardless_of_cstamp() {
-        let mut fixed = cand("2001:df1:7880:100::4c3", V6Kind::Stable, V6State::Preferred, 1, u64::MAX);
+        let mut fixed = cand(
+            "2001:df1:7880:100::4c3",
+            V6Kind::Stable,
+            V6State::Preferred,
+            1,
+            u64::MAX,
+        );
         fixed.permanent = true;
-        let dynamic = cand("2409:8a44:4cb9:7100::1", V6Kind::Stable, V6State::Preferred, 9000, 100_000);
+        let dynamic = cand(
+            "2409:8a44:4cb9:7100::1",
+            V6Kind::Stable,
+            V6State::Preferred,
+            9000,
+            100_000,
+        );
         match select(&[fixed, dynamic], &cfg(), None).unwrap() {
             Pick::Use { addr, .. } => {
                 assert_eq!(addr, "2001:df1:7880:100::4c3".parse::<Ipv6Addr>().unwrap())

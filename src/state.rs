@@ -34,7 +34,6 @@ pub struct State {
     dirty: bool,
 }
 
-
 #[derive(Serialize, Deserialize)]
 struct PersistedEntry {
     domain: String,
@@ -131,7 +130,9 @@ impl State {
         };
 
         for e in p.entries {
-            let Some(rtype) = RType::parse(&e.rtype) else { continue };
+            let Some(rtype) = RType::parse(&e.rtype) else {
+                continue;
+            };
             let target = Target {
                 domain: e.domain,
                 rr: e.rr,

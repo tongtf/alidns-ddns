@@ -19,10 +19,10 @@ mod util;
 use aliyun::{ApiError, Client};
 use config::{Config, Target, EX_CONFIG};
 use plan::{Desired, StepKind};
+use state::State;
 use std::collections::BTreeMap;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
-use state::State;
 
 fn main() {
     // 用 sysexits 的退出码区分"可重试"与"需人工介入"，配合 systemd 的
@@ -161,7 +161,6 @@ fn run() -> i32 {
         log::debug(format!("{}s 后再次检查", wait.as_secs()));
         idle(&events, wait);
     }
-
 }
 
 #[derive(Default)]
@@ -236,10 +235,7 @@ fn sync(
                     state.note_synced(&step.target, &value.to_string());
                     sum.skipped += 1;
                 }
-                StepKind::Update {
-                    ref id,
-                    ref value,
-                } => {
+                StepKind::Update { ref id, ref value } => {
                     if cfg.dry_run {
                         log::info(format!("[dry-run] 更新 {} -> {value}", step.target));
                         sum.updated += 1;
