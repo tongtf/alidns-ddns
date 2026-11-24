@@ -1,0 +1,30 @@
+[Unit]
+Description=AliDNS DDNS (single run)
+Documentation=https://github.com/tongtf/alidns-ddns
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/alidns-ddns --config /etc/alidns-ddns/config.json --once
+EnvironmentFile=/etc/alidns-ddns/env
+
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_NETLINK AF_LOCAL AF_INET AF_INET6
+UMask=0077

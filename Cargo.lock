@@ -8,6 +8,7 @@ version = "1.1.1"
 dependencies = [
  "hmac",
  "local-ip-address",
+ "neli",
  "serde",
  "serde_json",
  "sha2",

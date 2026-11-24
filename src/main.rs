@@ -1,764 +1,325 @@
-use hmac::{Hmac, Mac};
-use serde::Deserialize;
-use sha2::{Digest, Sha256};
+//! alidns-ddns —— 阿里云域名动态解析。
+//!
+//! 结构：`observe → diff → apply → schedule` 的对账循环。
+//! - `discover`：期望状态（公网 IPv4 探测、netlink 读取 IPv6 及其生命周期）
+//! - `plan`：纯函数，比较期望值与 DNS 实际记录
+//! - `aliyun`：签名、分页读取、幂等写入、错误分类
+//! - `state`：单调钟计时（变更窗口、退避、告警去重）
+
+mod aliyun;
+mod config;
+mod discover;
+mod log;
+mod plan;
+mod select;
+mod state;
+mod util;
+
+use aliyun::{ApiError, Client};
+use config::{Config, Target, EX_CONFIG};
+use plan::{Desired, StepKind};
 use std::collections::BTreeMap;
-use std::env;
-use std::fs;
-use std::net::IpAddr;
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-macro_rules! map {
-    ($($k:expr => $v:expr),* $(,)?) => {{
-        let mut m = BTreeMap::new();
-        $(m.insert($k.into(), $v.into());)*
-        m
-    }};
-}
-
-#[derive(Debug)]
-struct Args {
-    access_key_id: Option<String>,
-    access_key_secret: Option<String>,
-    domain: Option<String>,
-    rr: Option<String>,
-    ipv: Option<String>,
-    interface: Option<String>,
-    interval: Option<u64>,
-    config: String,
-}
-
-fn usage() -> String {
-    r#"alidns-ddns — 阿里云域名动态解析工具
-
-用法:
-  alidns-ddns [选项]
-
-选项:
-  --access-key-id <ID>              AccessKey ID (环境变量 ALIBABA_CLOUD_ACCESS_KEY_ID)
-  --access-key-secret <SECRET>      AccessKey Secret (环境变量 ALIBABA_CLOUD_ACCESS_KEY_SECRET)
-  --domain <DOMAIN>                 域名，如 example.com，多个用逗号分隔 (ALIDNS_DOMAIN)
-  --rr <RR>                         主机记录，如 @、www，多个用逗号分隔 (ALIDNS_RR, 默认 @)
-  --ipv <MODE>                      IP 模式: 4 / 6 / 46 (DDNS_IPV, 默认 6)
-  --interface <NAME>                网卡名，用于获取 IPv6 (ALIDNS_INTERFACE, 自动搜索)
-  --interval <SECS>                 更新间隔秒，最小 1 (DDNS_INTERVAL, 默认 3600)
-  -c, --config <PATH>               配置文件路径 (默认 config.json)
-  -h, --help                        显示此帮助
-
-优先级: 命令行参数 > 环境变量 > config.json > 默认值
-"#
-    .to_string()
-}
-
-fn parse_args() -> Args {
-    let mut args = Args {
-        access_key_id: None,
-        access_key_secret: None,
-        domain: None,
-        rr: None,
-        ipv: None,
-        interface: None,
-        interval: None,
-        config: "config.json".into(),
-    };
-    let mut it = env::args().skip(1);
-    while let Some(a) = it.next() {
-        if a == "-h" || a == "--help" {
-            print!("{}", usage());
-            std::process::exit(0);
-        } else if let Some(rest) = a.strip_prefix("--") {
-            let (k, inline_v) = match rest.split_once('=') {
-                Some((k, v)) => (k, Some(v)),
-                None => (rest, None),
-            };
-            let mut v = inline_v.map(|s| s.to_string());
-            if v.is_none() {
-                v = it.next();
-            }
-            let v = match v {
-                Some(x) => x,
-                None => {
-                    eprintln!("选项 --{k} 缺少值");
-                    std::process::exit(2);
-                }
-            };
-            match k {
-                "access-key-id" => args.access_key_id = Some(v),
-                "access-key-secret" => args.access_key_secret = Some(v),
-                "domain" => args.domain = Some(v),
-                "rr" => args.rr = Some(v),
-                "ipv" => args.ipv = Some(v),
-                "interface" => args.interface = Some(v),
-                "interval" => match v.parse::<u64>() {
-                    Ok(n) => args.interval = Some(n),
-                    Err(_) => {
-                        eprintln!("--interval 必须是正整数: {v}");
-                        std::process::exit(2);
-                    }
-                },
-                "config" => args.config = v,
-                _ => {
-                    eprintln!("未知选项: --{k}");
-                    std::process::exit(2);
-                }
-            }
-        } else if let Some(rest) = a.strip_prefix('-') {
-            match rest {
-                "c" => {
-                    let v = it.next().unwrap_or_else(|| {
-                        eprintln!("选项 -c 缺少值");
-                        std::process::exit(2);
-                    });
-                    args.config = v;
-                }
-                "h" => {
-                    print!("{}", usage());
-                    std::process::exit(0);
-                }
-                _ => {
-                    eprintln!("未知选项: -{rest}");
-                    std::process::exit(2);
-                }
-            }
-        } else {
-            eprintln!("非法参数: {a}");
-            std::process::exit(2);
-        }
-    }
-    args
-}
-
-#[derive(Deserialize, Default)]
-#[allow(non_snake_case)]
-struct Config {
-    #[serde(default)]
-    AccessKeyID: String,
-    #[serde(default)]
-    AccessKeySecret: String,
-    #[serde(default)]
-    DomainName: String,
-    #[serde(default = "default_rr")]
-    RR: String,
-    #[serde(default = "default_ipv")]
-    IPv: String,
-    #[serde(default = "default_interval")]
-    Interval: u64,
-    #[serde(default)]
-    Interface: String,
-}
-
-fn default_rr() -> String {
-    "@".into()
-}
-fn default_ipv() -> String {
-    "6".into()
-}
-fn default_interval() -> u64 {
-    3600
-}
-
-/// 三级优先级取值: 命令行参数 > 环境变量(非空) > 配置文件; 末尾兜底默认值
-///
-/// 把配置解析的契约集中在一点, 新增/修改取值来源时只需改这里, 避免六处各自复制导致分叉。
-fn resolve(
-    arg: Option<String>,
-    var: &str,
-    file: String,
-    fallback: impl FnOnce() -> String,
-) -> String {
-    arg.or_else(|| env::var(var).ok().filter(|s| !s.is_empty()))
-        .unwrap_or(file)
-        .if_empty(fallback)
-}
-
-impl Config {
-    fn from_args(args: &Args) -> Self {
-        // 从config.json加载基础配置
-        // 三级优先级中它是最末一级，但读取失败必须显式暴露：systemd 下
-        // DynamicUser 以临时 UID 运行, 读不到 600/root 的 config.json 会静默
-        // 回退默认值, 表现为"env 配了 AK/SK 却提示缺 DomainName"。
-        let file_config: Config = match fs::read_to_string(&args.config) {
-            Ok(d) => match serde_json::from_str(&d) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("警告: 配置文件 {} 解析失败，忽略该文件: {}", args.config, e);
-                    Config::default()
-                }
-            },
-            // 文件本就不存在是正常情况（纯用 env/CLI 时），不告警
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
-            Err(e) => {
-                eprintln!(
-                    "警告: 无法读取配置文件 {}（检查属主/权限，服务需能读取），本项回退默认值: {}",
-                    args.config, e
-                );
-                Config::default()
-            }
-        };
-
-        // 优先级: 命令行参数 > 环境变量 > config.json > 默认值
-        Self {
-            AccessKeyID: resolve(
-                args.access_key_id.clone(),
-                "ALIBABA_CLOUD_ACCESS_KEY_ID",
-                file_config.AccessKeyID,
-                String::new,
-            ),
-            AccessKeySecret: resolve(
-                args.access_key_secret.clone(),
-                "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
-                file_config.AccessKeySecret,
-                String::new,
-            ),
-            DomainName: resolve(
-                args.domain.clone(),
-                "ALIDNS_DOMAIN",
-                file_config.DomainName,
-                String::new,
-            ),
-            RR: resolve(args.rr.clone(), "ALIDNS_RR", file_config.RR, default_rr),
-            IPv: resolve(args.ipv.clone(), "DDNS_IPV", file_config.IPv, default_ipv),
-            // Interval 为 u64(需解析 + 下限保护), 不符合字符串取值契约, 保留内联
-            Interval: args
-                .interval
-                .or_else(|| env::var("DDNS_INTERVAL").ok().and_then(|v| v.parse().ok()))
-                .unwrap_or(file_config.Interval)
-                .max(1),
-            Interface: resolve(
-                args.interface.clone(),
-                "ALIDNS_INTERFACE",
-                file_config.Interface,
-                String::new,
-            ),
-        }
-    }
-}
-
-trait StringExt {
-    fn if_empty(self, f: impl FnOnce() -> Self) -> Self;
-}
-
-impl StringExt for String {
-    fn if_empty(self, f: impl FnOnce() -> Self) -> Self {
-        if self.is_empty() {
-            f()
-        } else {
-            self
-        }
-    }
-}
-
-fn rfc3339_now() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let days = (secs / 86_400) as i64;
-    let sec_of_day = (secs % 86_400) as i32;
-    let hour = sec_of_day / 3600;
-    let minute = (sec_of_day % 3600) / 60;
-    let second = sec_of_day % 60;
-    // Howard Hinnant 的 civil 日期算法（days since 1970-01-01 -> y/m/d）
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, m, d, hour, minute, second
-    )
-}
-
-fn make_nonce() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    format!(
-        "{:x}-{:x}-{:x}",
-        nanos,
-        COUNTER.fetch_add(1, Ordering::Relaxed),
-        std::process::id()
-    )
-}
-
-const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-
-fn hex_encode(data: &[u8]) -> String {
-    let mut s = String::with_capacity(data.len() * 2);
-    for &b in data {
-        s.push(HEX_DIGITS[(b >> 4) as usize] as char);
-        s.push(HEX_DIGITS[(b & 0x0f) as usize] as char);
-    }
-    s
-}
-
-// URL 百分号编码使用大写十六进制（如 %3A），与阿里云规范化要求一致。
-const PERCENT_HEX: &[u8; 16] = b"0123456789ABCDEF";
-
-fn percent_encode(s: &str) -> String {
-    // RFC3986: 保留 A-Za-z0-9-_.~ 不编码，其余按 UTF-8 字节大写编码
-    let mut out = String::with_capacity(s.len());
-    for &b in s.as_bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => {
-                out.push('%');
-                out.push(PERCENT_HEX[(b >> 4) as usize] as char);
-                out.push(PERCENT_HEX[(b & 0x0f) as usize] as char);
-            }
-        }
-    }
-    out
-}
-
-#[derive(Deserialize)]
-struct IpResponse {
-    ip: String,
-}
-
-#[derive(Deserialize)]
-#[allow(non_snake_case)]
-struct RecordsResponse {
-    DomainRecords: DomainRecords,
-}
-
-#[derive(Deserialize)]
-#[allow(non_snake_case)]
-struct DomainRecords {
-    Record: Vec<Record>,
-}
-
-#[derive(Deserialize)]
-#[allow(non_snake_case)]
-struct Record {
-    RecordId: String,
-    RR: String,
-    Value: String,
-    #[serde(rename = "Type")]
-    Type: String,
-}
-
-/// IPv4 探测端点：按顺序回退，任一可用即可。
-/// api.ipify.org 在部分网络（如中国大陆）不可达，故提供多个备选；
-/// 优先使用仅含 A 记录的域名，确保连接走 IPv4、返回的就是公网 IPv4。
-const IPV4_ENDPOINTS: &[&str] = &[
-    "https://api.ipify.org?format=json",
-    "https://v4.ident.me",
-    "https://ip.3322.net",
-    "https://ipv4.icanhazip.com",
-    "https://checkip.amazonaws.com",
-];
-
-fn get_ipv4() -> String {
-    for url in IPV4_ENDPOINTS {
-        let Ok(resp) = ureq::get(url).timeout(Duration::from_secs(8)).call() else {
-            continue;
-        };
-        let Ok(body) = resp.into_string() else {
-            continue;
-        };
-        let body = body.trim();
-        // 兼容 JSON（{"ip":"..."}）与纯文本两种响应
-        let ip = serde_json::from_str::<IpResponse>(body)
-            .map(|r| r.ip)
-            .unwrap_or_else(|_| body.to_string());
-        if ip.parse::<std::net::Ipv4Addr>().is_ok() {
-            return ip;
-        }
-    }
-    String::new()
-}
-
-/// 链接本地地址 fe80::/10：仅本链路可达、公网不可达，DDNS 不得采用。
-fn is_link_local_v6(octets: &[u8; 16]) -> bool {
-    octets[0] == 0xfe && (octets[1] & 0xc0) == 0x80
-}
-
-/// ULA 私有地址 fc00::/7（RFC 4193）。
-fn is_ula_v6(octets: &[u8; 16]) -> bool {
-    (octets[0] & 0xfe) == 0xfc
-}
-
-/// 是否为全局可路由的公网 IPv6（DDNS 首选）。排除 multicast、链接本地、
-/// ULA、未指定与回环等公网不可达地址。
-fn is_global_ipv6(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V6(v6) => {
-            let o = v6.octets();
-            o[0] != 0xff
-                && !is_link_local_v6(&o)
-                && !is_ula_v6(&o)
-                && !o.iter().all(|&b| b == 0) // 未指定 ::
-                && !v6.is_loopback() // ::1
-        }
-        _ => false,
-    }
-}
-
-/// 是否为 ULA 私有地址（fc00::/7），仅作为兜底：当不存在全局地址时才采用。
-fn is_ula_ipv6(ip: &IpAddr) -> bool {
-    match ip {
-        IpAddr::V6(v6) => is_ula_v6(&v6.octets()),
-        _ => false,
-    }
-}
-
-/// 从一组地址中挑选 IPv6：优先全局可路由的公网地址；缺失时兜底 ULA 私有地址。
-fn select_ipv6(addrs: &[IpAddr]) -> Option<String> {
-    addrs
-        .iter()
-        .find(|ip| is_global_ipv6(ip))
-        .or_else(|| addrs.iter().find(|ip| is_ula_ipv6(ip)))
-        .map(|ip| ip.to_string())
-}
-
-fn get_ipv6(interface: Option<&str>) -> String {
-    match local_ip_address::list_afinet_netifas() {
-        Ok(netifs) => {
-            // 指定网卡时先精确匹配，未命中则告警并回退自动搜索
-            if let Some(iface) = interface.filter(|s| !s.is_empty()) {
-                let matched: Vec<IpAddr> = netifs
-                    .iter()
-                    .filter(|(name, _)| name == iface)
-                    .map(|(_, ip)| *ip)
-                    .collect();
-                if matched.is_empty() {
-                    eprintln!("⚠️ 警告: 指定网卡 \"{}\" 不存在，自动搜索可用网卡。", iface);
-                } else if let Some(ip) = select_ipv6(&matched) {
-                    return ip;
-                } else {
-                    eprintln!(
-                        "⚠️ 警告: 网卡 \"{}\" 仅存在回环/链接本地地址，自动搜索可用网卡。",
-                        iface
-                    );
-                }
-            }
-            let all: Vec<IpAddr> = netifs.iter().map(|(_, ip)| *ip).collect();
-            select_ipv6(&all).unwrap_or_default()
-        }
-        Err(e) => {
-            eprintln!("获取本地网络地址失败: {}", e);
-            String::new()
-        }
-    }
-}
-
-/// 空 body 的 SHA-256：GET 请求无负载，为已知常量，避免每轮重复计算
-const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
-fn api_call(config: &Config, action: &str, params: BTreeMap<String, String>) -> String {
-    let host = "alidns.aliyuncs.com";
-    let nonce = make_nonce();
-    let ts = rfc3339_now();
-    let payload_hash = EMPTY_SHA256;
-
-    let mut headers: BTreeMap<String, String> = BTreeMap::new();
-    headers.insert("host".into(), host.into());
-    headers.insert("x-acs-action".into(), action.into());
-    headers.insert("x-acs-version".into(), "2015-01-09".into());
-    headers.insert("x-acs-date".into(), ts);
-    headers.insert("x-acs-signature-nonce".into(), nonce);
-    headers.insert("x-acs-content-sha256".into(), payload_hash.to_string());
-
-    let canonical_query = params
-        .iter()
-        .map(|(k, v)| format!("{}={}", percent_encode(k), percent_encode(v)))
-        .collect::<Vec<_>>()
-        .join("&");
-
-    let mut canonical_headers = String::new();
-    let mut signed_headers = Vec::new();
-    for (k, v) in &headers {
-        let lk = k.to_lowercase();
-        canonical_headers.push_str(&format!("{}:{}\n", lk, v));
-        signed_headers.push(lk);
-    }
-    let signed_headers_str = signed_headers.join(";");
-
-    let canonical_request = format!(
-        "GET\n/\n{}\n{}\n{}\n{}",
-        canonical_query, canonical_headers, signed_headers_str, payload_hash
-    );
-    let hashed_canonical = hex_encode(&sha256_hex(canonical_request.as_bytes()));
-    let string_to_sign = format!("ACS3-HMAC-SHA256\n{}", hashed_canonical);
-
-    let mut mac = match Hmac::<Sha256>::new_from_slice(config.AccessKeySecret.as_bytes()) {
-        Ok(mac) => mac,
-        Err(_) => {
-            eprintln!("错误: AccessKeySecret 长度非法（HMAC-SHA256 密钥上限 64 字节）");
-            std::process::exit(1);
-        }
-    };
-    mac.update(string_to_sign.as_bytes());
-    let sig = mac.finalize().into_bytes();
-    let signature = hex_encode(&sig);
-
-    let authorization = format!(
-        "ACS3-HMAC-SHA256 Credential={},SignedHeaders={},Signature={}",
-        config.AccessKeyID, signed_headers_str, signature
-    );
-    headers.insert("Authorization".into(), authorization);
-
-    let url = format!("https://{}/?{}", host, canonical_query);
-    let mut req = ureq::get(&url).timeout(Duration::from_secs(10));
-    for (k, v) in &headers {
-        req = req.set(k.as_str(), v.as_str());
-    }
-    match req.call() {
-        Ok(resp) => {
-            let body = match resp.into_string() {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("读取响应失败: {}", e);
-                    String::new()
-                }
-            };
-            body
-        }
-        Err(ureq::Error::Status(code, resp)) => {
-            let body = resp.into_string().unwrap_or_default();
-            eprintln!("API错误 [{}]: {}", code, &body[..body.len().min(200)]);
-            String::new()
-        }
-        Err(_) => String::new(),
-    }
-}
-
-fn sha256_hex(data: &[u8]) -> Vec<u8> {
-    Sha256::digest(data).to_vec()
-}
-
-fn update_dns(config: &Config, domain: &str, rr: &str, ip: &str, record_type: &str) {
-    if ip.is_empty() {
-        return;
-    }
-
-    let target = format!("{}.{}", rr, domain);
-    let resp = api_call(
-        config,
-        "DescribeDomainRecords",
-        map! {
-            "DomainName" => domain,
-            "RRKeyWord" => rr,
-        },
-    );
-
-    // 网络失败/超时返回空串，直接跳过本轮，避免后续 JSON 解析报 EOF 噪音
-    if resp.is_empty() {
-        eprintln!("{} 查询{}记录失败: 无响应，下轮重试", target, record_type);
-        return;
-    }
-
-    // 检查API错误
-    if let Ok(err) = serde_json::from_str::<ApiError>(&resp) {
-        if let Some(code) = err.Code {
-            eprintln!(
-                "{} 查询失败: {} - {}",
-                target,
-                code,
-                err.Message.unwrap_or_default()
-            );
-            return;
-        }
-    }
-
-    match serde_json::from_str::<RecordsResponse>(&resp) {
-        Ok(records) => {
-            match records
-                .DomainRecords
-                .Record
-                .iter()
-                .find(|r| r.RR == rr && r.Type == record_type)
-            {
-                Some(r) if r.Value == ip => {
-                    println!("{} {}记录 {} 无需更新", target, record_type, ip);
-                }
-                Some(r) => {
-                    println!("{} 更新{}记录: {} -> {}", target, record_type, r.Value, ip);
-                    let resp = api_call(
-                        config,
-                        "UpdateDomainRecord",
-                        map! {
-                            "RecordId" => &r.RecordId, "RR" => rr, "Value" => ip, "Type" => record_type,
-                        },
-                    );
-                    check_api_response(&resp, "更新", &target);
-                }
-                None => {
-                    println!("{} 添加{}记录: {}", target, record_type, ip);
-                    let resp = api_call(
-                        config,
-                        "AddDomainRecord",
-                        map! {
-                            "DomainName" => domain, "RR" => rr, "Value" => ip, "Type" => record_type,
-                        },
-                    );
-                    check_api_response(&resp, "添加", &target);
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("{} 解析响应失败: {}", target, e);
-            eprintln!("响应内容: {}", &resp[..resp.len().min(500)]);
-        }
-    }
-}
-
-fn check_api_response(resp: &str, action: &str, target: &str) {
-    if resp.is_empty() {
-        eprintln!("{} {}记录失败: 无响应", target, action);
-        return;
-    }
-    // 阿里云：成功响应为不含 Code 字段的 JSON 对象，错误响应带 Code+Message。
-    // 仅当确认为"已知成功结构"时才报成功，避免把截断/非标准报文谎报为成功。
-    match serde_json::from_str::<serde_json::Value>(resp) {
-        Ok(serde_json::Value::Object(map)) if map.contains_key("Code") => {
-            let code = map.get("Code").and_then(|v| v.as_str()).unwrap_or("");
-            let msg = map
-                .get("Message")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            eprintln!("{} {}记录失败: {} - {}", target, action, code, msg);
-        }
-        Ok(serde_json::Value::Object(_)) => println!("{} {}记录成功", target, action),
-        Ok(_) => eprintln!(
-            "{} {}记录: 未识别的响应结构，视为失败以待重试",
-            target, action
-        ),
-        Err(_) => eprintln!(
-            "{} {}记录: 响应无法解析（{}），视为失败以待重试",
-            target,
-            action,
-            &resp[..resp.len().min(120)]
-        ),
-    }
-}
-
-#[derive(Deserialize)]
-#[allow(non_snake_case)]
-struct ApiError {
-    Code: Option<String>,
-    Message: Option<String>,
-}
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
+use state::State;
 
 fn main() {
-    let args = parse_args();
-    let c = Config::from_args(&args);
+    // 用 sysexits 的退出码区分"可重试"与"需人工介入"，配合 systemd 的
+    // RestartPreventExitStatus=78 使用。
+    std::process::exit(run());
+}
 
-    if c.AccessKeyID.is_empty() || c.AccessKeySecret.is_empty() || c.DomainName.is_empty() {
-        eprintln!("错误: 请配置 AccessKeyID, AccessKeySecret, DomainName");
-        eprintln!("使用 --help 查看帮助");
-        std::process::exit(1);
+fn run() -> i32 {
+    let args = match config::parse_args() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("参数错误: {e}\n\n{}", config::usage());
+            return config::EX_USAGE;
+        }
+    };
+    if args.help {
+        print!("{}", config::usage());
+        return 0;
     }
 
-    // 支持逗号分隔的多域名/多 RR：
-    //   domains = [a.com, b.com], rrs = [@]        -> @.a.com, @.b.com
-    //   domains = [a.com],        rrs = [@, www]   -> @.a.com, www.a.com
-    //   两者等长时逐一配对
-    let domains: Vec<&str> = c
-        .DomainName
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect();
-    let rrs: Vec<&str> =
-        c.RR.split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .collect();
-    if domains.is_empty() {
-        eprintln!("错误: DomainName 为空");
-        std::process::exit(1);
-    }
-    if rrs.is_empty() {
-        eprintln!("错误: RR 为空");
-        std::process::exit(1);
-    }
-    let targets: Vec<(&str, &str)> = if domains.len() == 1 && rrs.len() > 1 {
-        rrs.iter().map(|rr| (domains[0], *rr)).collect()
-    } else if rrs.len() == 1 {
-        domains.iter().map(|d| (*d, rrs[0])).collect()
-    } else if domains.len() == rrs.len() {
-        domains
-            .iter()
-            .zip(rrs.iter())
-            .map(|(d, r)| (*d, *r))
-            .collect()
-    } else {
-        eprintln!(
-            "错误: 域名数({})与 RR 数({})无法配对（需一对多、多对一或等长）",
-            domains.len(),
-            rrs.len()
-        );
-        std::process::exit(1);
+    let cfg = match config::from_args(&args) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("配置错误: {e}");
+            return EX_CONFIG;
+        }
     };
 
-    // 去重（保持声明顺序），避免 --domain a.com,a.com 这类重复输入产生重复目标
-    let mut seen = std::collections::HashSet::new();
-    let targets: Vec<(&str, &str)> = targets.into_iter().filter(|t| seen.insert(*t)).collect();
-    if targets.is_empty() {
-        eprintln!("错误: 无有效的域名/RR 目标");
-        std::process::exit(1);
+    log::set_verbose(cfg.verbose);
+    for w in &cfg.warnings {
+        log::warn(w);
     }
-
-    // IP 模式必须至少包含 4 或 6，否则无意义且会静默空转
-    let want_v4 = c.IPv.contains('4');
-    let want_v6 = c.IPv.contains('6');
-    if !want_v4 && !want_v6 {
-        eprintln!("错误: --ipv 模式无效（需包含 4 和/或 6）: {}", c.IPv);
-        std::process::exit(1);
+    if cfg.dry_run {
+        log::warn("dry-run：只打印计划，不调用任何写接口");
     }
-
-    let iface_name = if c.Interface.is_empty() {
-        "自动"
-    } else {
-        c.Interface.as_str()
-    };
-    println!(
-        "域名: {} | IP模式: {} | 间隔: {}s | 网卡: {}",
-        targets
+    log::info(format!(
+        "启动：{} 个目标 [{}]，间隔 {}s，对账周期 {}s，TTL {}，线路 {}",
+        cfg.targets.len(),
+        cfg.targets
             .iter()
-            .map(|(d, r)| format!("{}.{}", r, d))
+            .map(|t| t.to_string())
             .collect::<Vec<_>>()
             .join(", "),
-        c.IPv,
-        c.Interval,
-        iface_name
-    );
+        cfg.interval,
+        cfg.verify_interval,
+        cfg.ttl,
+        cfg.line
+    ));
+
+    let http = discover::Http::new(Duration::from_secs(8));
+    let client = Client::new(&cfg);
+    let mut probe = discover::ipv4::Probe::default();
+    let mut state = State::default();
+    let events: Option<Receiver<()>> = if cfg.events && !cfg.once {
+        discover::ipv6::spawn_change_watcher()
+    } else {
+        None
+    };
+    if events.is_some() {
+        log::info("已订阅 netlink 地址变更事件（地址变化时提前唤醒）");
+    }
+
+    let by_domain = group_targets(&cfg.targets);
+
+    notify("READY=1");
 
     loop {
-        let (v4, v6) = (
-            if want_v4 { get_ipv4() } else { String::new() },
-            if want_v6 {
-                get_ipv6(Some(c.Interface.as_str()))
-            } else {
-                String::new()
-            },
-        );
-        println!("IPv4: {} | IPv6: {}", v4, v6);
+        notify("WATCHDOG=1");
+        let desired = discover::observe(&cfg, &http, &mut probe, &mut state);
 
-        if want_v4 {
-            for (d, rr) in &targets {
-                update_dns(&c, d, rr, &v4, "A");
+        let cycle_failed = match sync(&client, &cfg, &desired, &by_domain, &mut state) {
+            Ok(sum) => {
+                state.note_cycle_ok();
+                let line = format!(
+                    "本轮完成：更新 {}，新建 {}，一致 {}，跳过 {}",
+                    sum.updated, sum.added, sum.synced, sum.skipped
+                );
+                if sum.updated + sum.added > 0 {
+                    log::info(line);
+                } else {
+                    log::debug(line);
+                }
+                false
+            }
+            Err(e) if e.fatal() => {
+                log::error(format!("不可重试错误，退出：{e}"));
+                notify("STATUS=配置或鉴权错误，需要人工介入");
+                return EX_CONFIG;
+            }
+            Err(e) => {
+                state.note_cycle_fail();
+                log::warn(format!("本轮同步失败（{e}），退避后重试"));
+                true
+            }
+        };
+
+        // --once 模式：把本轮结果反映到退出码，供 systemd timer / 脚本判断
+        if cfg.once {
+            notify("STOPPING=1");
+            return if cycle_failed { 1 } else { 0 };
+        }
+
+        let wait = schedule(&desired, &state, &cfg);
+        log::debug(format!("{}s 后再次检查", wait.as_secs()));
+        idle(&events, wait);
+    }
+
+}
+
+#[derive(Default)]
+struct Summary {
+    updated: usize,
+    added: usize,
+    synced: usize,
+    skipped: usize,
+}
+
+fn group_targets(targets: &[Target]) -> BTreeMap<String, Vec<Target>> {
+    let mut map: BTreeMap<String, Vec<Target>> = BTreeMap::new();
+    for t in targets {
+        map.entry(t.domain.clone()).or_default().push(t.clone());
+    }
+    map
+}
+
+/// 对账一轮：每个域名只查一次 DNS，只为"需要校验"的目标生成动作。
+fn sync(
+    client: &Client,
+    cfg: &Config,
+    desired: &Desired,
+    by_domain: &BTreeMap<String, Vec<Target>>,
+    state: &mut State,
+) -> Result<Summary, ApiError> {
+    let mut sum = Summary::default();
+    let mut first_err: Option<ApiError> = None;
+    let verify = Duration::from_secs(cfg.verify_interval);
+
+    for (domain, targets) in by_domain {
+        // 期望值未变且距上次校验未超 verify-interval 时完全跳过 DNS 查询。
+        let need: Vec<&Target> = targets
+            .iter()
+            .filter(|t| match desired.value_for(t) {
+                Some(v) => state.needs_lookup(t, &v.to_string(), verify),
+                // 本轮没有该类型的地址：不动 DNS，也不记录校验时间。
+                None => false,
+            })
+            .collect();
+        if need.is_empty() {
+            continue;
+        }
+
+        let records = match client.list_records(domain) {
+            Ok(r) => r,
+            Err(e) if e.fatal() => return Err(e),
+            Err(e) => {
+                log::warn(format!("读取 {domain} 的记录失败：{e}"));
+                if first_err.is_none() {
+                    first_err = Some(e);
+                }
+                continue;
+            }
+        };
+
+        for step in plan::diff(&need, desired, &records, cfg.ttl) {
+            if let Some(note) = &step.note {
+                log::warn(note);
+            }
+            match step.kind {
+                StepKind::InSync { ref value } => {
+                    state.note_synced(&step.target, &value.to_string());
+                    sum.synced += 1;
+                }
+                StepKind::Skip { ref value } => {
+                    // 记为已校验，避免每个周期都去查同一条不可写的记录。
+                    state.note_synced(&step.target, &value.to_string());
+                    sum.skipped += 1;
+                }
+                StepKind::Update {
+                    ref id,
+                    ref value,
+                } => {
+                    if cfg.dry_run {
+                        log::info(format!("[dry-run] 更新 {} -> {value}", step.target));
+                        sum.updated += 1;
+                        continue;
+                    }
+                    match client.update(&step.target, id, &value.to_string(), cfg.ttl) {
+                        Ok(()) => {
+                            log::info(format!("更新 {} -> {value}", step.target));
+                            state.note_synced(&step.target, &value.to_string());
+                            state.note_change();
+                            sum.updated += 1;
+                        }
+                        Err(e) if e.fatal() => return Err(e),
+                        Err(e) => {
+                            log::warn(format!("更新 {} 失败：{e}", step.target));
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
+                    }
+                }
+                StepKind::Add { ref value } => {
+                    if cfg.dry_run {
+                        log::info(format!("[dry-run] 新建 {} -> {value}", step.target));
+                        sum.added += 1;
+                        continue;
+                    }
+                    match client.add(&step.target, &value.to_string(), cfg.ttl) {
+                        Ok(()) => {
+                            log::info(format!("新建 {} -> {value}", step.target));
+                            state.note_synced(&step.target, &value.to_string());
+                            state.note_change();
+                            sum.added += 1;
+                        }
+                        Err(e) if e.fatal() => return Err(e),
+                        Err(e) => {
+                            log::warn(format!("新建 {} 失败：{e}", step.target));
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
+                    }
+                }
             }
         }
-        if want_v6 {
-            for (d, rr) in &targets {
-                update_dns(&c, d, rr, &v6, "AAAA");
-            }
-        }
+    }
 
-        thread::sleep(Duration::from_secs(c.Interval));
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(sum),
     }
 }
+
+/// 自适应调度：默认间隔，变更后加速确认，`preferred_lft` 快到期时提前复查，失败则退避。
+fn schedule(d: &Desired, s: &State, cfg: &Config) -> Duration {
+    let mut next = Duration::from_secs(cfg.interval);
+
+    // 刚变更过：用更短的间隔确认新值稳定（也更快发现运营商的二次变更）
+    if s.recently_changed(Duration::from_secs(600)) {
+        next = next.min(Duration::from_secs(60));
+    }
+
+    // IPv6 生命周期即将到期：在过期前复查，避免把 deprecated 地址留在 DNS 里
+    if let Some(lft) = d.v6_lft {
+        let half = Duration::from_secs((lft / 2).max(15));
+        next = next.min(half);
+    }
+
+    if let Some(backoff) = s.backoff() {
+        next = next.max(backoff);
+    }
+    next
+}
+
+/// 等待下一轮；同时把长等待切成 ≤20s 的片，期间持续喂 systemd watchdog。
+fn idle(events: &Option<Receiver<()>>, total: Duration) {
+    let deadline = Instant::now() + total;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left < Duration::from_millis(100) {
+            break;
+        }
+        notify("WATCHDOG=1");
+        let slice = left.min(Duration::from_secs(20));
+        let woke = match events {
+            Some(rx) => matches!(rx.recv_timeout(slice), Ok(())),
+            None => {
+                std::thread::sleep(slice);
+                false
+            }
+        };
+        if woke {
+            log::debug("收到地址变更事件，提前唤醒");
+            break;
+        }
+    }
+}
+
+/// `sd_notify`：不需要任何依赖。`NOTIFY_SOCKET` 未设置时静默返回。
+#[cfg(target_os = "linux")]
+fn notify(state: &str) {
+    let Ok(path) = std::env::var("NOTIFY_SOCKET") else {
+        return;
+    };
+    let Ok(sock) = std::os::unix::net::UnixDatagram::unbound() else {
+        return;
+    };
+    let sent = if let Some(name) = path.strip_prefix('@') {
+        use std::os::linux::net::SocketAddrExt;
+        std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())
+            .and_then(|addr| sock.send_to_addr(state.as_bytes(), &addr))
+    } else {
+        std::os::unix::net::SocketAddr::from_pathname(&path)
+            .and_then(|addr| sock.send_to_addr(state.as_bytes(), &addr))
+    };
+    let _ = sent;
+}
+
+#[cfg(not(target_os = "linux"))]
+fn notify(_state: &str) {}
