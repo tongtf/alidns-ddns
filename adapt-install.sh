@@ -95,6 +95,9 @@ fi
 
 SRC_CONFIG=""
 SRC_ENV=""
+DEPLOYED_UNIT=""
+DEPLOYED_PLIST=""
+SUDO=""
 
 find_source() {
     if [ -n "$SOURCE_DIR" ]; then
@@ -104,6 +107,7 @@ find_source() {
     fi
     if [ "$SYSTEMD" = yes ]; then
         frag=$(systemctl show alidns-ddns.service -p FragmentPath --value 2>/dev/null || true)
+        [ -f "$frag" ] && DEPLOYED_UNIT=$frag
         unit_dir=$(dirname "$frag" 2>/dev/null || true)
         envfiles=$(systemctl show alidns-ddns.service -p EnvironmentFile --value 2>/dev/null || true)
         envfile=${envfiles%% *}
@@ -258,8 +262,16 @@ fi
 [ -n "${ADAPT_FORCE_CRED:-}" ] && CRED_MODE=$ADAPT_FORCE_CRED
 [ -n "${ADAPT_FORCE_CONTAINER:-}" ] && CONTAINER=$ADAPT_FORCE_CONTAINER
 [ -n "${ADAPT_FORCE_IPV6:-}" ] && HAS_IPV6=$ADAPT_FORCE_IPV6
+[ -n "${ADAPT_FORCE_UNIT:-}" ] && DEPLOYED_UNIT=$ADAPT_FORCE_UNIT
+[ -n "${ADAPT_FORCE_PLIST:-}" ] && DEPLOYED_PLIST=$ADAPT_FORCE_PLIST
 [ "$PLAN" = launchd ] && setup_launchd_paths
+[ "$PLAN" = launchd ] && [ -f "$PLIST_FILE" ] && DEPLOYED_PLIST=$PLIST_FILE
 [ "$PLAN" != systemd ] && CRED_MODE=envfile
+
+# 非 root 时尝试免密 sudo：systemd-creds 的 host key 只有 root 可读写
+if [ "$(id -u)" -ne 0 ] && command -v sudo >/dev/null 2>&1; then
+    sudo -n true >/dev/null 2>&1 && SUDO="sudo -n"
+fi
 
 if [ "$CONTAINER" = yes ] && [ "$PLAN" != launchd ]; then
     EXTRA_ARGS="--no-events"
@@ -323,6 +335,27 @@ write_file() {
 
 mkdir -p "$OUTPUT_DIR"
 
+# 重写单元里的 LoadCredential 行，兼容仓库模板和已部署单元
+rewrite_service_credentials() {
+    src=$1
+    dst=$2
+    mode=$3
+    awk -v mode="$mode" '
+        /^[[:space:]]*#?[[:space:]]*LoadCredential(Encrypted)?=/ { next }
+        /^\[Install\]/ && !done {
+            if (mode == "encrypted") {
+                print "LoadCredentialEncrypted=alidns-access-key-id:/etc/alidns-ddns/alidns-access-key-id.cred"
+                print "LoadCredentialEncrypted=alidns-access-key-secret:/etc/alidns-ddns/alidns-access-key-secret.cred"
+            } else if (mode == "loadcredential") {
+                print "LoadCredential=alidns-access-key-id:/etc/alidns-ddns/access_key_id"
+                print "LoadCredential=alidns-access-key-secret:/etc/alidns-ddns/access_key_secret"
+            }
+            done=1
+        }
+        { print }
+    ' "$src" > "$dst"
+}
+
 json_default() { [ -n "$1" ] && printf '%s' "$1" || printf '%s' "$2"; }
 bool_default() { case "$1" in true|false) printf '%s' "$1" ;; *) printf '%s' "$2" ;; esac; }
 
@@ -361,10 +394,15 @@ case "$CRED_MODE" in
               printf '%s' "$M_SK" > "$OUTPUT_DIR/access_key_secret"
             )
             if [ "$CRED_MODE" = encrypted ]; then
-                if printf '%s' "$M_SK" | systemd-creds encrypt --with-key=host \
+                if [ -z "$SUDO" ]; then
+                    warn "systemd-creds 加密需要 root（host key 仅 root 可读）；退回明文凭据文件（600）。可用 sudo 重跑以启用加密"
+                    rm -f "$OUTPUT_DIR"/*.cred
+                    CRED_MODE=loadcredential
+                elif printf '%s' "$M_SK" | $SUDO systemd-creds encrypt --with-key=host \
                     --name=alidns-access-key-secret - "$OUTPUT_DIR/alidns-access-key-secret.cred" 2>/dev/null \
-                   && printf '%s' "$M_AK" | systemd-creds encrypt --with-key=host \
+                   && printf '%s' "$M_AK" | $SUDO systemd-creds encrypt --with-key=host \
                     --name=alidns-access-key-id - "$OUTPUT_DIR/alidns-access-key-id.cred" 2>/dev/null; then
+                    $SUDO chown "$(id -u):$(id -g)" "$OUTPUT_DIR"/*.cred 2>/dev/null || true
                     rm -f "$OUTPUT_DIR/access_key_id" "$OUTPUT_DIR/access_key_secret"
                     CRED_LINES="# AK/SK 已加密为 *.cred（见输出目录）"
                 else
@@ -396,30 +434,29 @@ EOF
 chmod 600 "$OUTPUT_DIR/env" 2>/dev/null || true
 
 if [ "$PLAN" = systemd ]; then
-    if [ -f "$SCRIPT_DIR/alidns-ddns.service" ]; then
+    SERVICE_TMPL="$SCRIPT_DIR/alidns-ddns.service"
+    if [ ! -f "$SERVICE_TMPL" ] && [ -n "$DEPLOYED_UNIT" ] && [ -f "$DEPLOYED_UNIT" ]; then
+        SERVICE_TMPL=$DEPLOYED_UNIT
+        info "仓库模板缺失，改用已部署单元作为模板: $DEPLOYED_UNIT"
+    fi
+    if [ -f "$SERVICE_TMPL" ]; then
         tmp="$OUTPUT_DIR/.alidns-ddns.service.tmp"
-        cp "$SCRIPT_DIR/alidns-ddns.service" "$tmp"
+        cp "$SERVICE_TMPL" "$tmp"
         if [ -n "$EXTRA_ARGS" ]; then
             sed -i.bak "s|^ExecStart=\(.*\)$|ExecStart=\1 $EXTRA_ARGS|" "$tmp"
             rm -f "$tmp.bak"
         fi
-        case "$CRED_MODE" in
-            loadcredential)
-                sed -i.bak 's|^#LoadCredential=|LoadCredential=|' "$tmp"
-                rm -f "$tmp.bak"
-                ;;
-            encrypted)
-                sed -i.bak 's|^#LoadCredential=alidns-access-key-id:.*$|LoadCredentialEncrypted=alidns-access-key-id:/etc/alidns-ddns/alidns-access-key-id.cred|; s|^#LoadCredential=alidns-access-key-secret:.*$|LoadCredentialEncrypted=alidns-access-key-secret:/etc/alidns-ddns/alidns-access-key-secret.cred|' "$tmp"
-                rm -f "$tmp.bak"
-                ;;
-        esac
-        cp "$tmp" "$OUTPUT_DIR/alidns-ddns.service"
+        rewrite_service_credentials "$tmp" "$OUTPUT_DIR/alidns-ddns.service" "$CRED_MODE"
         rm -f "$tmp"
         info "已生成: $OUTPUT_DIR/alidns-ddns.service"
     else
-        warn "找不到模板 alidns-ddns.service，跳过服务单元生成"
+        warn "找不到 alidns-ddns.service 模板，跳过服务单元生成"
     fi
 elif [ "$PLAN" = launchd ]; then
+    if [ ! -f "$PLIST_SRC" ] && [ -n "$DEPLOYED_PLIST" ] && [ -f "$DEPLOYED_PLIST" ]; then
+        PLIST_SRC=$DEPLOYED_PLIST
+        info "仓库模板缺失，改用已部署 plist 作为模板: $DEPLOYED_PLIST"
+    fi
     if [ -f "$PLIST_SRC" ]; then
         dest="$OUTPUT_DIR/com.tongtf.alidns-ddns.plist"
         sed -e "s|@INSTALL_DIR@|$INSTALL_DIR|g" \
@@ -513,6 +550,11 @@ if [ "$APPLY" = yes ]; then
         cp "$OUTPUT_DIR/com.tongtf.alidns-ddns.plist" "$PLIST_FILE"
         info "已安装 launchd plist：$PLIST_FILE（请按 README 执行 bootstrap/kickstart）"
     fi
+fi
+
+# 若通过 sudo 运行，把生成文件还给原始用户，避免后续无法编辑
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ -d "$OUTPUT_DIR" ]; then
+    chown -R "$SUDO_USER:$(id -gn "$SUDO_USER")" "$OUTPUT_DIR" 2>/dev/null || true
 fi
 
 info ""
