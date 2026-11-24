@@ -87,6 +87,7 @@ API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `Access
 
 ## 注意事项
 
+- **默认不做 Release**：修 bug / 合并 PR 只提交代码，**不要**主动升版本、打 `v*` tag 或触发 Release 工作流。只有用户明确要求"发布/release/打 tag"时才执行
 - `config.json` 含占位凭证，**勿提交真实 Key 到仓库**
 - 需要阿里云 DNS 管理权限（`alidns:*`）
 - on-change 钩子以服务自身权限运行（Linux 单元是 DynamicUser + 无 capability + 只读文件系统），
