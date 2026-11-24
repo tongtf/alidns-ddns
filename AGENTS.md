@@ -13,7 +13,11 @@
 
 ## 配置优先级
 
-CLI参数（手写解析，支持 `--k=v`） > 环境变量 > `config.json` > 默认值
+CLI参数（手写解析，支持 `--k=v`） > systemd LoadCredential 文件 > 环境变量 > `config.json` > 默认值
+
+> LoadCredential 仅用于 AK/SK：凭据名 `alidns-access-key-id` / `alidns-access-key-secret`，
+> systemd 把它们挂载到 `$CREDENTIALS_DIRECTORY/`，程序读取其中的文件（自动 trim）。
+> 详见 README「用 systemd LoadCredential 传递凭证」与 `examples/alidns-ddns-credentials.conf`。
 
 ```bash
 # CLI 参数
@@ -67,7 +71,7 @@ cargo clippy                 # lint（无预配置的门控）
 # 不要做 UPX 压缩：与 systemd MemoryDenyWriteExecute=yes（W^X）冲突
 ```
 
-无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（71 个单测，macOS 另有 7 个地址解析单测）。
+无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（72 个单测，macOS 另有 7 个地址解析单测）。
 
 ## 关键行为
 
@@ -87,6 +91,7 @@ API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `Access
 
 ## 注意事项
 
+- **先分支后合并**：任何修改（尤其 bug 修复）都先新建分支，完成后通过 PR 合并回 `main`，不要直接提交 `main`
 - **默认不做 Release**：修 bug / 合并 PR 只提交代码，**不要**主动升版本、打 `v*` tag 或触发 Release 工作流。只有用户明确要求"发布/release/打 tag"时才执行
 - `config.json` 含占位凭证，**勿提交真实 Key 到仓库**
 - 需要阿里云 DNS 管理权限（`alidns:*`）

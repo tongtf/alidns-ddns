@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// sysexits.h: EX_CONFIG
 pub const EX_CONFIG: i32 = 78;
@@ -314,6 +314,34 @@ fn pick(arg: Option<String>, var: &str, from_file: String) -> String {
         .unwrap_or(from_file)
 }
 
+/// 从 systemd `LoadCredential=` 注入的目录读取凭据文件（内容按行读取并 trim）。
+fn credential_from(dir: &str, name: &str) -> Option<String> {
+    let path = Path::new(dir).join(name);
+    fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn read_credential(name: &str) -> Option<String> {
+    let dir = env::var("CREDENTIALS_DIRECTORY").ok()?;
+    credential_from(dir.trim(), name)
+}
+
+/// 凭证优先级：CLI > LoadCredential 文件 > 环境变量 > config.json。
+/// 凭据文件由 systemd 以 root 读取并挂载，进程无需自己读 600 的源文件。
+fn pick_credential(arg: Option<String>, cred_name: &str, var: &str, from_file: String) -> String {
+    arg.filter(|s| !s.is_empty())
+        .or_else(|| read_credential(cred_name))
+        .or_else(|| {
+            env::var(var)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or(from_file)
+}
+
 fn pick_u64(
     arg: Option<u64>,
     var: &str,
@@ -344,16 +372,21 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         ));
     }
     if args.access_key_secret.is_some() {
-        warnings.push("--access-key-secret 会出现在 /proc/<pid>/cmdline，建议改用环境变量".into());
+        warnings.push(
+            "--access-key-secret 会出现在 /proc/<pid>/cmdline，建议改用环境变量或 systemd LoadCredential"
+                .into(),
+        );
     }
 
-    let access_key_id = pick(
+    let access_key_id = pick_credential(
         args.access_key_id.clone(),
+        "alidns-access-key-id",
         "ALIBABA_CLOUD_ACCESS_KEY_ID",
         file.access_key_id,
     );
-    let access_key_secret = pick(
+    let access_key_secret = pick_credential(
         args.access_key_secret.clone(),
+        "alidns-access-key-secret",
         "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
         file.access_key_secret,
     );
@@ -658,6 +691,26 @@ mod tests {
     fn flag_parsing_rejects_bad_number() {
         let r = parse_args_from(["--interval", "abc"].into_iter().map(String::from));
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn credential_file_is_read_and_trimmed() {
+        let dir = std::env::temp_dir().join(format!(
+            "alidns-cred-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("alidns-access-key-id"), "  AKID\n").unwrap();
+        assert_eq!(
+            credential_from(dir.to_str().unwrap(), "alidns-access-key-id").as_deref(),
+            Some("AKID")
+        );
+        assert_eq!(credential_from(dir.to_str().unwrap(), "missing"), None);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

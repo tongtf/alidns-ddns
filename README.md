@@ -104,6 +104,35 @@ sudo systemctl enable alidns-ddns
 sudo journalctl -u alidns-ddns -f
 ```
 
+#### 用 systemd LoadCredential 传递凭证（推荐，systemd ≥ 247）
+
+`config.json` 因为 `DynamicUser` 需要可读而保持 644，不应写入真实 Secret。
+更稳妥的做法是用 `LoadCredential` 把 AK/SK 作为独立凭据文件注入：systemd 以 root 读取
+源文件并挂载到服务的 `$CREDENTIALS_DIRECTORY`，进程只需读挂载后的文件。
+
+```bash
+# 1) 创建 root:root 600 的凭据文件（注意只写值，不要 KEY=VALUE，末尾换行会被自动 trim）
+sudo sh -c 'umask 077; printf "%s" "LTAI5xxxxxxx" > /etc/alidns-ddns/access_key_id'
+sudo sh -c 'umask 077; printf "%s" "xxxxSecretxxxx" > /etc/alidns-ddns/access_key_secret'
+
+# 2) 用 drop-in 启用 LoadCredential（不要直接改已安装的单元）
+sudo mkdir -p /etc/systemd/system/alidns-ddns.service.d
+sudo cp examples/alidns-ddns-credentials.conf /etc/systemd/system/alidns-ddns.service.d/credentials.conf
+
+# 3) 生效
+sudo systemctl daemon-reload
+sudo systemctl restart alidns-ddns
+sudo journalctl -u alidns-ddns -n 20 -f
+```
+
+程序固定读取两个凭据名：`alidns-access-key-id` 和 `alidns-access-key-secret`；
+配置优先级为 **CLI > LoadCredential > 环境变量 > config.json**。
+启用后可以从 `/etc/alidns-ddns/env` 中删掉 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET`
+两行（其余非敏感配置仍可保留在 env 或 config.json 中）。
+
+> 若 systemd 版本较老不支持 `LoadCredential`，请继续使用 `chmod 600` 的 `EnvironmentFile`，
+> 并确认 `config.json` 中 `AccessKeySecret` 为空。
+
 **macOS (launchd) — 推荐系统级服务（开机即启，不依赖图形登录）:**
 
 ```bash
