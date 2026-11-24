@@ -30,6 +30,15 @@ pub struct Probe {
 }
 
 impl Probe {
+    /// 从持久化的端点 URL 恢复粘性（端点列表变化时自动失效，不会越界）。
+    pub fn set_sticky_endpoint(&mut self, endpoint: Option<&str>) {
+        self.sticky = endpoint.and_then(|ep| ENDPOINTS.iter().position(|e| *e == ep));
+    }
+
+    pub fn sticky_endpoint(&self) -> Option<&'static str> {
+        self.sticky.map(|i| ENDPOINTS[i])
+    }
+
     pub fn probe(&mut self, http: &Http) -> Option<Ipv4Addr> {
         let start = self.sticky.unwrap_or(0) % ENDPOINTS.len();
         for offset in 0..ENDPOINTS.len() {

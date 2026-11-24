@@ -73,8 +73,14 @@ fn run() -> i32 {
 
     let http = discover::Http::new(Duration::from_secs(8));
     let client = Client::new(&cfg);
+    let mut state = State::load(cfg.state_file.clone());
     let mut probe = discover::ipv4::Probe::default();
-    let mut state = State::default();
+    probe.set_sticky_endpoint(state.ipv4_endpoint());
+    if let Some(path) = &cfg.state_file {
+        log::info(format!("状态文件: {}", path.display()));
+    } else {
+        log::info("状态持久化已禁用（每次运行从零开始）");
+    }
     let events: Option<Receiver<()>> = if cfg.events && !cfg.once {
         discover::ipv6::spawn_change_watcher()
     } else {
@@ -91,6 +97,8 @@ fn run() -> i32 {
     loop {
         notify("WATCHDOG=1");
         let desired = discover::observe(&cfg, &http, &mut probe, &mut state);
+        // 端点粘性独立于 State：只在变化时写回，避免每轮都把状态标记为脏
+        state.set_ipv4_endpoint(probe.sticky_endpoint());
 
         let cycle_failed = match sync(&client, &cfg, &desired, &by_domain, &mut state) {
             Ok(sum) => {
@@ -109,6 +117,9 @@ fn run() -> i32 {
             Err(e) if e.fatal() => {
                 log::error(format!("不可重试错误，退出：{e}"));
                 notify("STATUS=配置或鉴权错误，需要人工介入");
+                if !cfg.dry_run {
+                    state.save_if_dirty();
+                }
                 return EX_CONFIG;
             }
             Err(e) => {
@@ -117,6 +128,11 @@ fn run() -> i32 {
                 true
             }
         };
+
+        // dry-run 不落盘：连状态文件都不应被修改
+        if !cfg.dry_run {
+            state.save_if_dirty();
+        }
 
         // --once 模式：把本轮结果反映到退出码，供 systemd timer / 脚本判断
         if cfg.once {

@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::ErrorKind;
+use std::path::PathBuf;
 
 /// sysexits.h: EX_CONFIG
 pub const EX_CONFIG: i32 = 78;
@@ -22,6 +23,14 @@ pub enum RType {
 }
 
 impl RType {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "A" => Some(RType::A),
+            "AAAA" => Some(RType::Aaaa),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             RType::A => "A",
@@ -96,6 +105,8 @@ pub struct Config {
     pub dry_run: bool,
     pub verbose: bool,
     pub events: bool,
+    /// 状态文件路径；None 表示禁用持久化。
+    pub state_file: Option<PathBuf>,
     pub warnings: Vec<String>,
 }
 
@@ -113,7 +124,9 @@ pub struct Args {
     pub line: Option<String>,
     pub ipv6_prefer: Option<String>,
     pub config: Option<String>,
+    pub state_file: Option<String>,
     pub allow_ula: bool,
+    pub no_state: bool,
     pub once: bool,
     pub dry_run: bool,
     pub verbose: bool,
@@ -145,6 +158,8 @@ IPv6 策略:
   --ipv6-prefer <MODE>            auto / stable / temporary (ALIDNS_IPV6_PREFER, 默认 auto)
   --allow-ula                     允许把 ULA(fc00::/7) 写入 AAAA（默认拒绝）
   --no-events                     关闭 netlink 地址变更事件订阅（Linux）
+  --state-file <PATH>             状态文件路径 (DDNS_STATE_FILE / config.json StateFile)
+  --no-state                      禁用状态持久化（每次运行都从零开始）
 
 运行模式:
   --once                          只执行一轮即退出（配合 systemd timer）
@@ -183,6 +198,7 @@ fn parse_args_from<I: Iterator<Item = String>>(mut it: I) -> Result<Args, String
                 "verbose" => a.verbose = true,
                 "allow-ula" => a.allow_ula = true,
                 "no-events" => a.no_events = true,
+                "no-state" => a.no_state = true,
                 "access-key-id" => a.access_key_id = Some(value(k, inline, &mut it)?),
                 "access-key-secret" => a.access_key_secret = Some(value(k, inline, &mut it)?),
                 "domain" => a.domain = Some(value(k, inline, &mut it)?),
@@ -192,6 +208,7 @@ fn parse_args_from<I: Iterator<Item = String>>(mut it: I) -> Result<Args, String
                 "line" => a.line = Some(value(k, inline, &mut it)?),
                 "ipv6-prefer" => a.ipv6_prefer = Some(value(k, inline, &mut it)?),
                 "config" => a.config = Some(value(k, inline, &mut it)?),
+                "state-file" => a.state_file = Some(value(k, inline, &mut it)?),
                 "interval" => a.interval = Some(number(k, inline, &mut it)?),
                 "verify-interval" => a.verify_interval = Some(number(k, inline, &mut it)?),
                 "ttl" => a.ttl = Some(number(k, inline, &mut it)?),
@@ -265,6 +282,8 @@ struct FileConfig {
     ttl: Option<u64>,
     #[serde(default, rename = "AllowUla")]
     allow_ula: bool,
+    #[serde(default, rename = "StateFile")]
+    state_file: String,
 }
 
 fn env_truthy(var: &str) -> bool {
@@ -391,6 +410,21 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
 
     let targets = expand_targets(&domain_raw, &rr_raw, &line, want_v4, want_v6)?;
 
+    let state_file = if args.no_state {
+        None
+    } else {
+        let raw = pick(
+            args.state_file.clone(),
+            "DDNS_STATE_FILE",
+            file.state_file.clone(),
+        );
+        if raw.trim().is_empty() {
+            default_state_path()
+        } else {
+            Some(PathBuf::from(raw.trim()))
+        }
+    };
+
     Ok(Config {
         access_key_id: access_key_id.trim().to_string(),
         access_key_secret,
@@ -408,8 +442,32 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         dry_run: args.dry_run,
         verbose: args.verbose || env_truthy("DDNS_VERBOSE"),
         events: !args.no_events,
+        state_file,
         warnings,
     })
+}
+
+/// 默认状态文件路径。systemd 的 `StateDirectory=` 会导出 `STATE_DIRECTORY`，
+/// 用它可在 DynamicUser + ProtectSystem=strict 下正确写入私有状态目录。
+fn default_state_path() -> Option<PathBuf> {
+    if let Ok(dir) = env::var("STATE_DIRECTORY") {
+        if !dir.trim().is_empty() {
+            return Some(PathBuf::from(dir.trim()).join("state.json"));
+        }
+    }
+    if let Ok(base) = env::var("XDG_STATE_HOME") {
+        if !base.trim().is_empty() {
+            return Some(PathBuf::from(base.trim()).join("alidns-ddns/state.json"));
+        }
+    }
+    if let Ok(home) = env::var("HOME") {
+        if !home.trim().is_empty() {
+            return Some(
+                PathBuf::from(home.trim()).join(".local/state/alidns-ddns/state.json"),
+            );
+        }
+    }
+    None
 }
 
 fn load_file(path: &str) -> Result<FileConfig, String> {

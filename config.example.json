@@ -9,5 +9,6 @@
     "Ttl": 600,
     "Line": "default",
     "Ipv6Prefer": "auto",
-    "AllowUla": false
+    "AllowUla": false,
+    "StateFile": ""
 }

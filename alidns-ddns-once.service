@@ -28,3 +28,5 @@ MemoryDenyWriteExecute=yes
 PrivateDevices=yes
 RestrictAddressFamilies=AF_NETLINK AF_LOCAL AF_INET AF_INET6
 UMask=0077
+# 注意：常驻服务与 --once timer 共用同一状态文件，二者只能启用其一
+StateDirectory=alidns-ddns

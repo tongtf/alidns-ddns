@@ -33,6 +33,7 @@ DDNS_VERIFY_INTERVAL（IP 未变时的 DNS 对账周期，默认 21600）
 DDNS_TTL（默认 600）、DDNS_LINE（默认 default）
 ALIDNS_IPV6_PREFER（auto/stable/temporary，默认 auto）
 DDNS_ALLOW_ULA（默认 false，不允许把 ULA 写入公网 AAAA）
+DDNS_STATE_FILE（状态文件路径；默认见下文；--no-state 可禁用）
 ALIDNS_INTERFACE（网卡名，如 eth0，默认自动搜索；不存在时 warning 并回退）
 
 > 网卡选择仅用于本地 IPv6 获取。Linux 用 netlink `RTM_GETADDR` 读取 `IFA_FLAGS` 和
@@ -44,6 +45,12 @@ ALIDNS_INTERFACE（网卡名，如 eth0，默认自动搜索；不存在时 warn
 
 # 配置文件路径
 ./alidns-ddns -c /path/to/config.json    # 默认 ./config.json
+
+# 状态文件：保存期望值缓存/退避计数/告警去重/IPv4 端点粘性
+# 默认依次取 $STATE_DIRECTORY/state.json（systemd StateDirectory）、
+# $XDG_STATE_HOME/alidns-ddns/state.json、$HOME/.local/state/alidns-ddns/state.json
+./alidns-ddns --state-file /var/lib/alidns-ddns/state.json
+./alidns-ddns --no-state        # 完全无状态（不推荐用于 timer 模式）
 ```
 
 ## 构建 / 检查
@@ -64,6 +71,9 @@ upx --best target/release/alidns-ddns  # 可选压缩
 3. `apply`：IP 变化时更新 / 新建 A / AAAA；`Status=Disable` 告警、Locked 跳过
 4. `schedule`：默认 300s；刚变更后 60s 内复查；`preferred_lft` 快到期时提前唤醒；失败指数退避 30s→5min；Linux 订阅 `RTMGRP_IPV6_IFADDR` 事件提前唤醒
 5. 期望值未变且未到 `verify-interval` 时完全跳过 DNS 查询；错误分类：网络退避、限流退避、鉴权/时钟退出 78
+6. 状态原子落盘（`state.json`，版本号 + 原子 rename），跨进程重启保留缓存/退避/端点粘性；
+   `--dry-run` 不写状态文件。systemd 单元已设 `StateDirectory=alidns-ddns`（导出 `$STATE_DIRECTORY`）；
+   常驻与 timer 两种形态共用同一状态，**只能启用其中一种**
 
 API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `AccessKeySecret`（不附加 `&`）。参数通过 HTTP Header（`Authorization`/`x-acs-*`）传递，非 Query 参数。
 

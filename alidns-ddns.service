@@ -21,6 +21,9 @@ RestartSec=10
 # sysexits.h: EX_CONFIG=78 → 配置或鉴权问题，重启无意义
 RestartPreventExitStatus=78
 UMask=0077
+# 持久化期望值缓存/退避/端点粘性；systemd 会导出 $STATE_DIRECTORY
+# 注意：常驻服务与 --once timer 共用同一状态文件，二者只能启用其一
+StateDirectory=alidns-ddns
 
 # --- 文件系统只读隔离 ---
 PrivateTmp=yes

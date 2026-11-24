@@ -468,12 +468,24 @@ CapabilityBoundingSet=
 | **P1 选取** | netlink + 地址状态模型 + ULA 拒绝 + 单测 | ~330 | 中 | 解决 IPv6 轮换核心问题 |
 | **P2 对账** | 模块拆分、`plan`/`Outcome`、错误分类、退避、自适应调度、批量查询 | ~300 | 中 | API 调用降一个数量级，故障可自愈 |
 | **P3 运维** | 日志、`sd_notify` watchdog、`--once`/`--dry-run`、退出码、单元文件 | ~180 | 低 | 挂死可发现，配置错误不刷屏 |
-| **P4 可选** | netlink 事件订阅（`RTMGRP_IPV6_IFADDR`）、状态持久化 | ~150 | 中 | 延迟从"一个周期"降到秒级 |
+| **P4 已完成** | netlink 事件订阅（`RTMGRP_IPV6_IFADDR`）、状态持久化（原子写 `state.json`） | ~330 | 中 | 延迟从"一个周期"降到秒级；timer 模式也能跳过无变化查询 |
 
 建议顺序：P0 → P1 → P3 → P2 → P4。P3 提前做，是因为它能立刻改善线上可观测性，
 而 P2 的重构在可观测性到位后更好验证。
 
 ---
+
+## 8.1 状态持久化（P4 补充）
+
+`State` 与 IPv4 端点粘性原本都是内存态，导致 `--once` 定时器每拍都重新探测并全量查询 DNS
+（5 分钟一拍 ≈ 288 次读/天/域名），比常驻模式（6h 校验周期 ≈ 4 次/天/域名）反而更重。
+
+实现：`State::load/save_if_dirty` 把期望值缓存、连续失败数、变更时间、告警去重（24h TTL）、
+端点 URL 写入 `state.json`（`version` 字段 + 同目录临时文件 + `rename` 原子替换）。
+- 路径优先级：`--state-file` > `DDNS_STATE_FILE` > config `StateFile` > `$STATE_DIRECTORY/state.json` > XDG/HOME 兜底
+- 单调钟 `Instant` 不能直接持久化：落盘用 Unix 秒，恢复时用 `Instant::now() - 间隔`；时钟回拨按"刚校验"处理，宁可多查一次也不永久跳过对账
+- systemd 单元加 `StateDirectory=alidns-ddns`，在 `DynamicUser` + `ProtectSystem=strict` 下获得可写私有目录
+- `--dry-run` 不写状态文件；常驻与 timer 共用同一状态，只能启用其中一种形态
 
 ## 9. 非目标
 
