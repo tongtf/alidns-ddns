@@ -162,18 +162,19 @@ fn bucket_order(prefer: V6Prefer) -> [Bucket; 5] {
 
 /// 同一桶内的排序：`Greater` 表示 a 更优。
 fn better(a: &V6Cand, b: &V6Cand, kernel_pick: Option<Ipv6Addr>) -> Ordering {
-    // 1) 创建时间更新者优先（u32 回绕安全）
+    // 1) 静态/永久地址优先：手工配置的固定 IP 有 IFA_F_PERMANENT，不会随 RA 消失，
+    //    比"创建更晚但会过期"的 SLAAC 地址更适合作为长期发布的 AAAA。
+    match a.permanent.cmp(&b.permanent) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // 2) 创建时间更新者优先（u32 回绕安全），用于前缀变更与临时地址轮换
     let dc = a.cstamp.wrapping_sub(b.cstamp) as i32;
     if dc != 0 {
         return dc.cmp(&0);
     }
-    // 2) 剩余 valid_lft 更大者优先（形态 B：旧前缀寿命在倒数）
+    // 3) 剩余 valid_lft 更大者优先（形态 B：旧前缀寿命在倒数）
     match a.valid_lft.cmp(&b.valid_lft) {
-        Ordering::Equal => {}
-        other => return other,
-    }
-    // 3) 永久地址优先（手工/静态配置，不会随 RA 消失）
-    match a.permanent.cmp(&b.permanent) {
         Ordering::Equal => {}
         other => return other,
     }
@@ -378,6 +379,37 @@ mod tests {
         let k = Some("2408::b".parse::<Ipv6Addr>().unwrap());
         match select(&set, &cfg(), k).unwrap() {
             Pick::Use { addr, .. } => assert_eq!(addr, "2408::b".parse::<Ipv6Addr>().unwrap()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 静态 IPv6：`preferred_lft=valid_lft=0xFFFFFFFF` → u64::MAX，
+    /// 通常还带 IFA_F_PERMANENT。应正常选中，且无需生命周期提前复查。
+    #[test]
+    fn static_permanent_address() {
+        let mut c = cand("2001:df1:7880:100::4c3", V6Kind::Stable, V6State::Preferred, 1, u64::MAX);
+        c.permanent = true;
+        c.preferred_lft = u64::MAX;
+        match select(&[c], &cfg(), None).unwrap() {
+            Pick::Use { addr, preferred_lft, warn } => {
+                assert_eq!(addr, "2001:df1:7880:100::4c3".parse::<Ipv6Addr>().unwrap());
+                assert_eq!(preferred_lft, u64::MAX);
+                assert!(warn.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// 静态地址即便 cstamp 更早，也优先于会过期的 SLAAC 地址。
+    #[test]
+    fn static_beats_dynamic_regardless_of_cstamp() {
+        let mut fixed = cand("2001:df1:7880:100::4c3", V6Kind::Stable, V6State::Preferred, 1, u64::MAX);
+        fixed.permanent = true;
+        let dynamic = cand("2409:8a44:4cb9:7100::1", V6Kind::Stable, V6State::Preferred, 9000, 100_000);
+        match select(&[fixed, dynamic], &cfg(), None).unwrap() {
+            Pick::Use { addr, .. } => {
+                assert_eq!(addr, "2001:df1:7880:100::4c3".parse::<Ipv6Addr>().unwrap())
+            }
             other => panic!("{other:?}"),
         }
     }
