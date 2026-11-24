@@ -88,7 +88,7 @@ fn run() -> i32 {
     } else {
         log::info("状态持久化已禁用（每次运行从零开始）");
     }
-    let events: Option<Receiver<()>> = if cfg.events && !cfg.once {
+    let events: Option<Receiver<()>> = if cfg.events {
         discover::ipv6::spawn_change_watcher()
     } else {
         None
@@ -108,11 +108,9 @@ fn run() -> i32 {
         state.set_ipv4_endpoint(probe.sticky_endpoint());
 
         let changed: Vec<Target>;
-        let cycle_failed: bool;
         match sync(&client, &cfg, &desired, &by_domain, &mut state) {
             Ok((sum, err)) => {
                 changed = sum.changed;
-                cycle_failed = err.is_some();
                 match err {
                     None => state.note_cycle_ok(),
                     Some(e) => {
@@ -134,6 +132,7 @@ fn run() -> i32 {
             Err(e) => {
                 log::error(format!("不可重试错误，退出：{e}"));
                 notify("STATUS=配置或鉴权错误，需要人工介入");
+                notify("STOPPING=1");
                 persist(&cfg, &mut state);
                 return EX_CONFIG;
             }
@@ -154,12 +153,6 @@ fn run() -> i32 {
                 // 钩子失败不回滚 DNS，也不改变本轮退出码
                 log::warn(e);
             }
-        }
-
-        // --once 模式：把本轮结果反映到退出码，供 systemd timer / 脚本判断
-        if cfg.once {
-            notify("STOPPING=1");
-            return if cycle_failed { 1 } else { 0 };
         }
 
         let wait = schedule(&desired, &state, &cfg);

@@ -60,10 +60,6 @@ Linux)
 
     echo "安装systemd服务..."
     cp alidns-ddns.service "$SERVICE_FILE"
-    cp alidns-ddns-once.service /etc/systemd/system/alidns-ddns-once.service
-    cp alidns-ddns.timer /etc/systemd/system/alidns-ddns.timer
-    # 默认仍是常驻模式；timer 不自动启用，避免与常驻服务双实例
-    systemctl disable --now alidns-ddns.timer >/dev/null 2>&1 || true
     systemctl daemon-reload
 
     echo ""
@@ -74,13 +70,6 @@ Linux)
     echo "  2. 启动服务: sudo systemctl start alidns-ddns"
     echo "  3. 开机自启: sudo systemctl enable alidns-ddns"
     echo "  4. 查看日志: sudo journalctl -u alidns-ddns -f"
-    echo ""
-    echo "  可选定时模式（二选一，不要与常驻服务同时启用）:"
-    echo "    sudo systemctl disable --now alidns-ddns"
-    echo "    sudo systemctl enable --now alidns-ddns.timer"
-    echo "  切回常驻模式:"
-    echo "    sudo systemctl disable --now alidns-ddns.timer"
-    echo "    sudo systemctl enable --now alidns-ddns"
     echo ""
     echo "  凭证也可用 systemd LoadCredential（可选加密），见 README"
     ;;

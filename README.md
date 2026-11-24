@@ -23,7 +23,7 @@
 - **状态持久化**：`state.json` 原子落盘，跨重启保留期望值缓存/退避/告警去重/IPv4 端点粘性
 - **故障自愈**：错误分类 + 指数退避（30s→5min）+ 鉴权错误退出 78（不再无效重启）+ systemd watchdog
 - **IP 变更钩子** `--on-change`：A/AAAA 真正写入后执行外部命令，支持 reload 邮件服务 / 通知 acme.sh
-- 支持 A (IPv4) / AAAA (IPv6) / 双栈模式；常驻进程与 systemd timer 两种运行形态
+- 支持 A (IPv4) / AAAA (IPv6) / 双栈模式；常驻进程运行
 - 三种配置方式：命令行参数、环境变量、配置文件；优先级 CLI > 环境变量 > 配置文件 > 默认值
 - ACS3-HMAC-SHA256 V3 签名认证
 - 服务支持：Linux systemd / macOS launchd，开机自启
@@ -102,16 +102,6 @@ sudo vim /etc/alidns-ddns/env    # 填入 AccessKey
 sudo systemctl start alidns-ddns
 sudo systemctl enable alidns-ddns
 sudo journalctl -u alidns-ddns -f
-```
-
-`install.sh` 会同时安装 `alidns-ddns.service`、`alidns-ddns-once.service` 与
-`alidns-ddns.timer`，但**默认只启用常驻服务**，不会启用 timer（避免双实例）。
-切换到定时模式（二者互斥）：
-
-```bash
-sudo systemctl disable --now alidns-ddns
-sudo systemctl enable --now alidns-ddns.timer
-# 切回常驻：sudo systemctl disable --now alidns-ddns.timer && sudo systemctl enable --now alidns-ddns
 ```
 
 #### 用 systemd LoadCredential 传递凭证（推荐，systemd ≥ 247）
@@ -240,7 +230,6 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
 | `--on-change` | `DDNS_ON_CHANGE` | `OnChange` | IP 变更后执行的命令 | 无 |
 | `--on-change-timeout` | `DDNS_ON_CHANGE_TIMEOUT` | `OnChangeTimeout` | 钩子超时（秒），1–3600 | `60` |
 | `--no-events` | — | — | 关闭 Linux netlink 地址变更订阅 | false |
-| `--once` | — | — | 只跑一轮（配合 systemd timer） | false |
 | `--dry-run` | — | — | 只打印计划，不写 API、不执行钩子、不写状态 | false |
 | `-v, --verbose` | `DDNS_VERBOSE` | — | 输出候选地址与判定细节 | false |
 | `-c, --config` | — | — | 配置文件路径 | `config.json` |
@@ -391,7 +380,7 @@ alidns-ddns/
 ├── examples/                 # on-change 钩子 + root reload 单元样例
 ├── Cargo.toml
 ├── config.example.json / env.example
-├── alidns-ddns.service / alidns-ddns-once.service / alidns-ddns.timer
+├── alidns-ddns.service
 ├── alidns-ddns.plist / alidns-ddns-daemon.plist   # macOS launchd 模板
 ├── install.sh                # 自动检测 Linux / macOS，root/普通用户分模式
 ├── LICENSE / CONTRIBUTING.md / SECURITY.md

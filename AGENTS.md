@@ -26,8 +26,8 @@ CLI参数（手写解析，支持 `--k=v`） > systemd LoadCredential 文件 > �
 # CLI 参数
 ./alidns-ddns --access-key-id AKID --access-key-secret SECRET --domain example.com --rr @ --ipv 4 --interval 300
 
-# 排查用：只跑一轮 / 只打印计划不写 API
-./alidns-ddns --once --dry-run -v
+# 排查用：只打印计划不写 API
+./alidns-ddns --dry-run -v
 
 支持逗号分隔的多域名/多 RR（`--domain a.com,b.com --rr @,www`），域名数与 RR 数一对多、多对一或等长时配对，统一解析到同一个获取的公网 IP。
 
@@ -62,7 +62,7 @@ ALIDNS_INTERFACE（网卡名，如 eth0，默认自动搜索；不存在时 warn
 # 默认依次取 $STATE_DIRECTORY/state.json（systemd StateDirectory）、
 # $XDG_STATE_HOME/alidns-ddns/state.json、$HOME/.local/state/alidns-ddns/state.json
 ./alidns-ddns --state-file /var/lib/alidns-ddns/state.json
-./alidns-ddns --no-state        # 完全无状态（不推荐用于 timer 模式）
+./alidns-ddns --no-state        # 完全无状态（不推荐）
 ```
 
 ## 构建 / 检查
@@ -85,8 +85,7 @@ cargo clippy                 # lint（无预配置的门控）
 5. 期望值未变且未到 `verify-interval` 时完全跳过 DNS 查询；错误分类：网络退避、限流退避、鉴权/时钟退出 78
 6. IP 真正写入后执行 `--on-change` 钩子（同步、带超时、失败只告警；`--dry-run` 不执行）
 7. 状态原子落盘（`state.json`，版本号 + 原子 rename），跨进程重启保留缓存/退避/端点粘性；
-   `--dry-run` 不写状态文件。systemd 单元已设 `StateDirectory=alidns-ddns`（导出 `$STATE_DIRECTORY`）；
-   常驻与 timer 两种形态共用同一状态，**只能启用其中一种**
+   `--dry-run` 不写状态文件。systemd 单元已设 `StateDirectory=alidns-ddns`（导出 `$STATE_DIRECTORY`）
 
 API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `AccessKeySecret`（不附加 `&`）。参数通过 HTTP Header（`Authorization`/`x-acs-*`）传递，非 Query 参数。
 
@@ -102,11 +101,11 @@ API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `Access
   不能直接 reload root 服务；`examples/ddns-changed.sh` + `examples/alidns-ddns-reload.path/.service`
   提供了"写 StateDirectory 标志文件 → root 单元 reload postfix/dovecot"的完整样例（README 有安装步骤）。
   钩子继承环境变量（含 ALIBABA_CLOUD_ACCESS_KEY_SECRET，供 acme.sh 复用），只应配置可信命令
-- 退出码：`78` = 配置/鉴权错误（systemd `RestartPreventExitStatus=78` 不再重启），`2` = 参数错误，`1` = `--once` 单轮失败，`0` = 正常
+- 退出码：`78` = 配置/鉴权错误（systemd `RestartPreventExitStatus=78` 不再重启），`2` = 参数错误，`0` = 正常退出（常驻循环仅在致命错误时退出）
 - 配置解析失败现在快速失败（退出 78），不再静默用默认值；`config.json` 的未知键同样报错（防拼错）
 - 不要使用子用户 AccessKey
 - 服务部署按 OS 分发（`install.sh` 用 `uname -s` 检测）：
-  - Linux：systemd `alidns-ddns.service`（常驻，`Type=notify` + watchdog）+ `EnvironmentFile=/etc/alidns-ddns/env`，需 root；另有可选的 `alidns-ddns-once.service` + `alidns-ddns.timer` 定时模式（`--once`，无需常驻进程）
+  - Linux：systemd `alidns-ddns.service`（常驻，`Type=notify` + watchdog）+ `EnvironmentFile=/etc/alidns-ddns/env`，需 root
   - macOS：launchd 两种模式（`install.sh` 按是否 root 分发，模板均含 `@INSTALL_DIR@`/`@CONFIG_DIR@`/`@LOG_DIR@` 占位符，sed 生成）：
     - root（`sudo ./install.sh`）→ 系统级 LaunchDaemon `alidns-ddns-daemon.plist`（另含 `@USERNAME@`）装到 `/Library/LaunchDaemons/`，`UserName=$SUDO_USER`，配置 `/etc/alidns-ddns/config.json`，日志 `/usr/local/var/log/alidns-ddns.log`，Label `system/com.tongtf.alidns-ddns`；**不依赖登录会话，开机即启**，并会清掉用户级残留避免双实例
     - 普通用户 → LaunchAgent `alidns-ddns.plist` 装到 `~/Library/LaunchAgents/`，配置 `~/.config/alidns-ddns/config.json`，日志 `~/Library/Logs/alidns-ddns.log`；域探测 `launchctl print gui/$UID` 成功用 gui，否则回退 user；**模板必须带 `LimitLoadToSessionType` 数组 `[Aqua, Background]`**——默认值 Aqua 在 SSH/无图形会话下 bootstrap 会报 `Bootstrap failed: 5`，仅 Background 又会在图形登录时报 134 拒载
