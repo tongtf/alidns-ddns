@@ -154,8 +154,8 @@ sudo journalctl -u alidns-ddns -n 20 -f
 启用后可以从 `/etc/alidns-ddns/env` 中删掉 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET`
 两行（其余非敏感配置仍可保留在 env 或 config.json 中）。
 
-> 若 systemd 版本较老不支持 `LoadCredential`，请继续使用 `chmod 600` 的 `EnvironmentFile`，
-> 并确认 `config.json` 中 `AccessKeySecret` 为空。
+> 若 systemd 版本较老不支持 `LoadCredential`，请继续使用 `chmod 600` 的 `EnvironmentFile`
+> 并在其中设置 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET`；密钥不要写进 `config.json`（旧键会报错）。
 
 ##### 可选：加密凭据（LoadCredentialEncrypted，systemd ≥ 250）
 

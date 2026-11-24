@@ -160,7 +160,7 @@ IPv6 策略:
   --ipv6-prefer <MODE>            auto / stable / temporary (DDNS_IPV6_PREFER, 默认 auto)
   --allow-ula                     允许把 ULA(fc00::/7) 写入 AAAA（默认拒绝）
   --no-events                     关闭 netlink 地址变更事件订阅（Linux）
-  --state-file <PATH>             状态文件路径 (DDNS_STATE_FILE / config.json StateFile)
+  --state-file <PATH>             状态文件路径 (DDNS_STATE_FILE；不放在 config.json)
   --no-state                      禁用状态持久化（每次运行都从零开始）
   --on-change <CMD>               IP 实际变更后执行的命令 (DDNS_ON_CHANGE)
   --on-change-timeout <SECS>      钩子超时 (DDNS_ON_CHANGE_TIMEOUT, 默认 60)
@@ -258,7 +258,7 @@ fn number<I: Iterator<Item = String>>(
         .map_err(|_| format!("选项 --{k} 需要非负整数: {raw}"))
 }
 
-// 未知键直接报错，兑现"配置错误快速失败"的承诺（拼错 Ipv6Prefer 等不再静默用默认值）
+// 未知键直接报错，兑现"配置错误快速失败"的承诺（拼错 ipv6_prefer 等不再静默用默认值）
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {

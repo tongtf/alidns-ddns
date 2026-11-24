@@ -282,7 +282,7 @@ write_file "$OUTPUT_DIR/README.generated.txt" <<EOF
    密钥不要写进 config.json，只从 env 或 LoadCredential 提供。
 2) 把生成的文件复制到目标位置（见下方对应方案）。
 
-systemd（$PLAN=systemd）：
+systemd 方案：
   sudo cp $OUTPUT_DIR/config.json /etc/alidns-ddns/config.json
   sudo cp $OUTPUT_DIR/env /etc/alidns-ddns/env
   sudo cp $OUTPUT_DIR/alidns-ddns.service /etc/systemd/system/alidns-ddns.service
