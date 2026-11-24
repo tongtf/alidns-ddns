@@ -64,7 +64,7 @@ ALIDNS_INTERFACE（网卡名，如 eth0，默认自动搜索；不存在时 warn
 cargo build --release        # release profile: opt-level=s, strip, lto
 cargo check                  # 快速类型检查
 cargo clippy                 # lint（无预配置的门控）
-upx --best target/release/alidns-ddns  # 可选压缩
+# 不要做 UPX 压缩：与 systemd MemoryDenyWriteExecute=yes（W^X）冲突
 ```
 
 无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（65 个单测，macOS 另有 7 个地址解析单测）。

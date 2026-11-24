@@ -70,12 +70,6 @@ jobs:
           fi
           cargo build "${args[@]}"
 
-      - name: Compress with UPX
-        if: contains(matrix.target, 'unknown-linux')
-        run: |
-          sudo apt-get update && sudo apt-get install -y upx
-          upx --best target/${{ matrix.target }}/release/alidns-ddns
-
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
@@ -133,6 +127,11 @@ jobs:
             tar xzf alidns-ddns-linux-amd64.tar.gz
             ./alidns-ddns --domain example.com --rr @ --access-key-id YOUR_KEY --access-key-secret YOUR_SECRET
             ```
+
+            ### 安全说明
+
+            Linux 发布包**未使用 UPX 压缩**（UPX 运行时需要 W+X 内存，与随附 systemd 单元的
+            `MemoryDenyWriteExecute=yes` 冲突）；二进制已通过 strip + LTO + opt-level=s 瘦身。
 
             ### 变更
 

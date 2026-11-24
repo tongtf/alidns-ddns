@@ -47,6 +47,7 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes
+# 禁止 W+X 内存；二进制因此不能使用 UPX 等运行时自解压壳
 MemoryDenyWriteExecute=yes
 PrivateDevices=yes
 PrivatePIDs=yes

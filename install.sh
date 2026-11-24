@@ -37,7 +37,6 @@ Linux)
     SERVICE_FILE="/etc/systemd/system/alidns-ddns.service"
 
     build_release
-    upx --best target/release/alidns-ddns 2>/dev/null || true
 
     echo "创建配置目录..."
     mkdir -p "$CONFIG_DIR"

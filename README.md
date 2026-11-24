@@ -13,7 +13,7 @@
 ## 功能特性
 
 - **仅支持阿里云 DNS** — 专注单一服务商，API 调用精简高效
-- **依赖极简** — ureq / serde / sha2 / hmac + Linux 下 neli（已在依赖树中）；无 tokio，编译后约 1.8MB，upx 压缩后约 900KB
+- **依赖极简** — ureq / serde / sha2 / hmac + Linux 下 neli（已在依赖树中）；无 tokio，二进制约 1.8MB（strip + LTO + opt-level=s，不做 UPX 压缩，见下文安全说明）
 - 自动探测公网 IPv4（5 个端点回退 + 端点粘性 + 公网性校验，适配大陆网络）
 - **IPv6 按 RFC 4862/4941 选取**：Linux 用 netlink 读取 `IFA_FLAGS` + `IFA_CACHEINFO`，macOS 解析 `ifconfig -a -L`；
   区分 preferred / deprecated / tentative / 临时地址，按 `cstamp`（macOS 用 `valid_lft`）取最新；
@@ -64,8 +64,6 @@
 
 ```bash
 cargo build --release
-# 可选: UPX 压缩
-upx --best target/release/alidns-ddns
 ```
 
 ### 运行
@@ -315,6 +313,10 @@ alidns-ddns/
 ```
 
 ## 安全说明
+
+- **不要对二进制做 UPX 压缩**：UPX 运行时需要 `mprotect(PROT_READ|PROT_WRITE|PROT_EXEC)` 解压自身，
+  与 systemd 单元的 `MemoryDenyWriteExecute=yes`（W^X 加固）直接冲突，会导致服务启动即崩。
+  发布包因此不使用 UPX；约 900KB 的体积收益不值得牺牲这条缓解措施。
 
 - **切勿**将包含真实 AccessKey 的 `config.json` 提交到版本控制
 - 按项目约定**不使用子用户 AccessKey**；为专用账号授予 DNS 管理权限（`alidns:*`）

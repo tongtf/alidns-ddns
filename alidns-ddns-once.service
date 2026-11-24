@@ -26,6 +26,7 @@ LockPersonality=yes
 CapabilityBoundingSet=
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes
+# 禁止 W+X 内存；二进制因此不能使用 UPX 等运行时自解压壳
 MemoryDenyWriteExecute=yes
 PrivateDevices=yes
 RestrictAddressFamilies=AF_NETLINK AF_LOCAL AF_INET AF_INET6
