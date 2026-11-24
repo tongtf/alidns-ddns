@@ -105,6 +105,9 @@ pub struct Config {
     pub dry_run: bool,
     pub verbose: bool,
     pub events: bool,
+    /// IP 变更后执行的外部命令；None 表示不执行。
+    pub on_change: Option<String>,
+    pub on_change_timeout: u64,
     /// 状态文件路径；None 表示禁用持久化。
     pub state_file: Option<PathBuf>,
     pub warnings: Vec<String>,
@@ -127,6 +130,8 @@ pub struct Args {
     pub state_file: Option<String>,
     pub allow_ula: bool,
     pub no_state: bool,
+    pub on_change: Option<String>,
+    pub on_change_timeout: Option<u64>,
     pub once: bool,
     pub dry_run: bool,
     pub verbose: bool,
@@ -160,6 +165,8 @@ IPv6 策略:
   --no-events                     关闭 netlink 地址变更事件订阅（Linux）
   --state-file <PATH>             状态文件路径 (DDNS_STATE_FILE / config.json StateFile)
   --no-state                      禁用状态持久化（每次运行都从零开始）
+  --on-change <CMD>               IP 实际变更后执行的命令 (DDNS_ON_CHANGE)
+  --on-change-timeout <SECS>      钩子超时 (DDNS_ON_CHANGE_TIMEOUT, 默认 60)
 
 运行模式:
   --once                          只执行一轮即退出（配合 systemd timer）
@@ -199,6 +206,8 @@ fn parse_args_from<I: Iterator<Item = String>>(mut it: I) -> Result<Args, String
                 "allow-ula" => a.allow_ula = true,
                 "no-events" => a.no_events = true,
                 "no-state" => a.no_state = true,
+                "on-change" => a.on_change = Some(value(k, inline, &mut it)?),
+                "on-change-timeout" => a.on_change_timeout = Some(number(k, inline, &mut it)?),
                 "access-key-id" => a.access_key_id = Some(value(k, inline, &mut it)?),
                 "access-key-secret" => a.access_key_secret = Some(value(k, inline, &mut it)?),
                 "domain" => a.domain = Some(value(k, inline, &mut it)?),
@@ -284,6 +293,10 @@ struct FileConfig {
     allow_ula: bool,
     #[serde(default, rename = "StateFile")]
     state_file: String,
+    #[serde(default, rename = "OnChange")]
+    on_change: String,
+    #[serde(default, rename = "OnChangeTimeout")]
+    on_change_timeout: Option<u64>,
 }
 
 fn env_truthy(var: &str) -> bool {
@@ -409,6 +422,18 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         rr_raw
     };
 
+    let on_change_timeout = pick_u64(
+        args.on_change_timeout,
+        "DDNS_ON_CHANGE_TIMEOUT",
+        file.on_change_timeout,
+        60,
+    )?;
+    if !(1..=3600).contains(&on_change_timeout) {
+        return Err(format!(
+            "--on-change-timeout 取值范围 1..3600，收到: {on_change_timeout}"
+        ));
+    }
+
     let targets = expand_targets(&domain_raw, &rr_raw, &line, want_v4, want_v6)?;
 
     let state_file = if args.no_state {
@@ -443,6 +468,13 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         dry_run: args.dry_run,
         verbose: args.verbose || env_truthy("DDNS_VERBOSE"),
         events: !args.no_events,
+        on_change: {
+            let cmd = pick(args.on_change.clone(), "DDNS_ON_CHANGE", file.on_change.clone())
+                .trim()
+                .to_string();
+            if cmd.is_empty() { None } else { Some(cmd) }
+        },
+        on_change_timeout,
         state_file,
         warnings,
     })

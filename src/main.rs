@@ -9,6 +9,7 @@
 mod aliyun;
 mod config;
 mod discover;
+mod hook;
 mod log;
 mod plan;
 mod select;
@@ -100,6 +101,7 @@ fn run() -> i32 {
         // 端点粘性独立于 State：只在变化时写回，避免每轮都把状态标记为脏
         state.set_ipv4_endpoint(probe.sticky_endpoint());
 
+        let mut changed: Vec<Target> = Vec::new();
         let cycle_failed = match sync(&client, &cfg, &desired, &by_domain, &mut state) {
             Ok(sum) => {
                 state.note_cycle_ok();
@@ -112,6 +114,7 @@ fn run() -> i32 {
                 } else {
                     log::debug(line);
                 }
+                changed = sum.changed;
                 false
             }
             Err(e) if e.fatal() => {
@@ -134,6 +137,20 @@ fn run() -> i32 {
             state.save_if_dirty();
         }
 
+        if let Some(command) = &cfg.on_change {
+            let h = hook::Hook {
+                command,
+                timeout: Duration::from_secs(cfg.on_change_timeout),
+                changed: &changed,
+                desired: &desired,
+                dry_run: cfg.dry_run,
+            };
+            if let Err(e) = hook::run(&h) {
+                // 钩子失败不回滚 DNS，也不改变本轮退出码
+                log::warn(e);
+            }
+        }
+
         // --once 模式：把本轮结果反映到退出码，供 systemd timer / 脚本判断
         if cfg.once {
             notify("STOPPING=1");
@@ -153,6 +170,8 @@ struct Summary {
     added: usize,
     synced: usize,
     skipped: usize,
+    /// 实际发生写入（Update/Add）的目标，供 on-change 钩子使用。
+    changed: Vec<Target>,
 }
 
 fn group_targets(targets: &[Target]) -> BTreeMap<String, Vec<Target>> {
@@ -224,6 +243,7 @@ fn sync(
                     if cfg.dry_run {
                         log::info(format!("[dry-run] 更新 {} -> {value}", step.target));
                         sum.updated += 1;
+                        sum.changed.push(step.target.clone());
                         continue;
                     }
                     match client.update(&step.target, id, &value.to_string(), cfg.ttl) {
@@ -232,6 +252,7 @@ fn sync(
                             state.note_synced(&step.target, &value.to_string());
                             state.note_change();
                             sum.updated += 1;
+                            sum.changed.push(step.target.clone());
                         }
                         Err(e) if e.fatal() => return Err(e),
                         Err(e) => {
@@ -246,6 +267,7 @@ fn sync(
                     if cfg.dry_run {
                         log::info(format!("[dry-run] 新建 {} -> {value}", step.target));
                         sum.added += 1;
+                        sum.changed.push(step.target.clone());
                         continue;
                     }
                     match client.add(&step.target, &value.to_string(), cfg.ttl) {
@@ -254,6 +276,7 @@ fn sync(
                             state.note_synced(&step.target, &value.to_string());
                             state.note_change();
                             sum.added += 1;
+                            sum.changed.push(step.target.clone());
                         }
                         Err(e) if e.fatal() => return Err(e),
                         Err(e) => {

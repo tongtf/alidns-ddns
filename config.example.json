@@ -10,5 +10,7 @@
     "Line": "default",
     "Ipv6Prefer": "auto",
     "AllowUla": false,
-    "StateFile": ""
+    "StateFile": "",
+    "OnChange": "",
+    "OnChangeTimeout": 60
 }

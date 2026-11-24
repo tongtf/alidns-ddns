@@ -502,6 +502,18 @@ macOS 的 `getifaddrs()` 与 Linux 一样只有接口标志（`IFF_*`），拿�
 
 仍缺：macOS 的地址变更事件通知（SystemConfiguration FFI），目前只能靠轮询。
 
+## 8.3 IP 变更钩子（已实现）
+
+`--on-change <CMD>` / `DDNS_ON_CHANGE` / config `OnChange`：只在 A/AAAA 真正写入后同步执行，
+`--dry-run` 不执行。通过环境变量传递 `DDNS_CHANGED=1`、`DDNS_CHANGED_COUNT`、
+`DDNS_CHANGED_TARGETS`（逗号分隔）、`DDNS_IPV4` / `DDNS_IPV6`，避免把 IP 拼进命令造成注入。
+超时默认 60s（`--on-change-timeout`），超时 kill；钩子失败只告警，不回滚 DNS、不改变退出码。
+
+钩子继承服务进程的环境变量（包括阿里云 AK/SK，便于复用到 acme.sh），因此只应配置可信命令。
+注意：Linux systemd 单元以 DynamicUser + 空 capability + `ProtectSystem=strict` 运行，
+钩子无法直接 reload root 拥有的服务（如 postfix）。推荐做法是让钩子在 StateDirectory 内
+写标志文件，由另一个特权单元监听该文件执行 reload。macOS launchd 单元同理按运行用户授权。
+
 ## 9. 非目标
 
 - 不引入 async runtime（tokio 等）：单线程阻塞模型足够

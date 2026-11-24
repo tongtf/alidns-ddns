@@ -34,6 +34,7 @@ DDNS_TTL（默认 600）、DDNS_LINE（默认 default）
 ALIDNS_IPV6_PREFER（auto/stable/temporary，默认 auto）
 DDNS_ALLOW_ULA（默认 false，不允许把 ULA 写入公网 AAAA）
 DDNS_STATE_FILE（状态文件路径；默认见下文；--no-state 可禁用）
+DDNS_ON_CHANGE / DDNS_ON_CHANGE_TIMEOUT（IP 实际变化后执行的钩子，默认 60s 超时）
 ALIDNS_INTERFACE（网卡名，如 eth0，默认自动搜索；不存在时 warning 并回退）
 
 > 网卡选择仅用于本地 IPv6 获取。Linux 用 netlink `RTM_GETADDR` 读取 `IFA_FLAGS` 和
@@ -45,6 +46,10 @@ ALIDNS_INTERFACE（网卡名，如 eth0，默认自动搜索；不存在时 warn
 
 # 配置文件路径
 ./alidns-ddns -c /path/to/config.json    # 默认 ./config.json
+
+# IP 变化钩子：只在 A/AAAA 真正写入后执行，环境变量 DDNS_CHANGED/DDNS_IPV4/
+# DDNS_IPV6/DDNS_CHANGED_TARGETS/DDNS_CHANGED_COUNT 可用；失败只告警不影响 DNS
+./alidns-ddns --on-change /usr/local/bin/ddns-changed --on-change-timeout 60
 
 # 状态文件：保存期望值缓存/退避计数/告警去重/IPv4 端点粘性
 # 默认依次取 $STATE_DIRECTORY/state.json（systemd StateDirectory）、
@@ -62,7 +67,7 @@ cargo clippy                 # lint（无预配置的门控）
 upx --best target/release/alidns-ddns  # 可选压缩
 ```
 
-无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（60 个单测，macOS 另有 7 个地址解析单测）。
+无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（65 个单测，macOS 另有 7 个地址解析单测）。
 
 ## 关键行为
 
@@ -71,7 +76,8 @@ upx --best target/release/alidns-ddns  # 可选压缩
 3. `apply`：IP 变化时更新 / 新建 A / AAAA；`Status=Disable` 告警、Locked 跳过
 4. `schedule`：默认 300s；刚变更后 60s 内复查；`preferred_lft` 快到期时提前唤醒；失败指数退避 30s→5min；Linux 订阅 `RTMGRP_IPV6_IFADDR` 事件提前唤醒
 5. 期望值未变且未到 `verify-interval` 时完全跳过 DNS 查询；错误分类：网络退避、限流退避、鉴权/时钟退出 78
-6. 状态原子落盘（`state.json`，版本号 + 原子 rename），跨进程重启保留缓存/退避/端点粘性；
+6. IP 真正写入后执行 `--on-change` 钩子（同步、带超时、失败只告警；`--dry-run` 不执行）
+7. 状态原子落盘（`state.json`，版本号 + 原子 rename），跨进程重启保留缓存/退避/端点粘性；
    `--dry-run` 不写状态文件。systemd 单元已设 `StateDirectory=alidns-ddns`（导出 `$STATE_DIRECTORY`）；
    常驻与 timer 两种形态共用同一状态，**只能启用其中一种**
 
@@ -83,6 +89,9 @@ API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `Access
 
 - `config.json` 含占位凭证，**勿提交真实 Key 到仓库**
 - 需要阿里云 DNS 管理权限（`alidns:*`）
+- on-change 钩子以服务自身权限运行（Linux 单元是 DynamicUser + 无 capability + 只读文件系统），
+  不能直接 reload root 服务；需要时让钩子写一个 StateDirectory 内的标志文件，由另一个 root 单元监听。
+  钩子继承环境变量（含 ALIBABA_CLOUD_ACCESS_KEY_SECRET，供 acme.sh 复用），只应配置可信命令
 - 退出码：`78` = 配置/鉴权错误（systemd `RestartPreventExitStatus=78` 不再重启），`2` = 参数错误，`1` = `--once` 单轮失败，`0` = 正常
 - 配置解析失败现在快速失败（退出 78），不再静默用默认值
 - 不要使用子用户 AccessKey
