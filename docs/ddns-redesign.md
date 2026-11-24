@@ -29,7 +29,7 @@ IPv4 结果不校验公网性。这三个会分别导致崩溃、重复记录、
 
 | 区段 | 行数 | 职责 | 评价 |
 |---|---|---|---|
-| 参数解析 | 19–129 | 手写 `--k v` / `--k=v` / `-c` | 可用，但缺 `--`、`-c=path`、`--once` |
+| 参数解析 | 19–129 | 手写 `--k v` / `--k=v` / `-c` | 可用，但缺 `--`、`-c=path` |
 | 配置解析 | 131–249 | JSON + 三级优先级 | 字段名用 `#[allow(non_snake_case)]` |
 | ACS3 签名 | 251–323 | RFC3339 / nonce / percent / HMAC | 正确，但混在 main 里 |
 | 响应类型 | 325–350 | serde 结构 | `Type` 用了 rename，命名不统一 |
@@ -83,7 +83,7 @@ IPv4 结果不校验公网性。这三个会分别导致崩溃、重复记录、
 | ⑬ | `514` | 每次 `ureq::get` 新建 agent，不复用连接/TLS 会话 |
 | ⑭ | `363-381` | 端点无粘性：大陆网络下 ipify 每轮超时 8s 才回退 |
 | ⑮ | `740` | 默认 `Interval=3600`：邮件服务器的 IP 变化最长 1 小时才生效 |
-| ⑯ | — | 无 `--once` / `--dry-run`，无法用 systemd timer 或排查 |
+| ⑯ | — | 无 `--dry-run`，无法安全预演 |
 
 #### P2 — 可维护性
 
@@ -197,7 +197,7 @@ LoadCredential=alidns-access-key-secret:/etc/alidns-ddns/access_key_secret
 | 源地址选择 | `RTM_GETROUTE` / `ip -6 route get` | 未用 | 多网卡时无裁决 |
 | 进程就绪/存活 | `sd_notify` + `WatchdogSec` | `Type=simple` | 挂死不可见 |
 | 密钥传递 | `LoadCredential` | 644 的 JSON 或 600 的 env | 存在明文暴露面 |
-| 调度 | `systemd timer` + `--once` | 进程内 `sleep` | 无外部可控性 |
+| 调度 | 进程内自适应调度 | 固定 `sleep` | 无外部可控性 |
 | 退出语义 | `sysexits.h` | 一律 `1` | 无法区分可重试/不可重试 |
 
 ---
@@ -397,7 +397,6 @@ fn schedule(d: &Desired, s: &State, cfg: &Config) -> Duration {
 | `--line` | `DDNS_LINE` | `Line` | `default` | 记录线路 |
 | `--ipv6-prefer` | `ALIDNS_IPV6_PREFER` | `Ipv6Prefer` | `auto` | `auto`/`stable`/`temporary` |
 | `--allow-ula` | `DDNS_ALLOW_ULA` | `AllowUla` | false | 显式允许发布 ULA（默认拒绝） |
-| `--once` | — | — | false | 跑一轮即退出（timer 模式/排查） |
 | `--dry-run` | — | — | false | 只打印计划，不写 API |
 | `-v/--verbose` | `DDNS_VERBOSE` | — | false | 打印每个候选地址的判定过程 |
 
@@ -433,14 +432,11 @@ CapabilityBoundingSet=
 `RestartPreventExitStatus=78` 是关键：配置/鉴权错误进 `failed` 状态而不是无限重启，
 运维 `systemctl status` 一眼可见。
 
-### 6.2 两种运行形态
+### 6.2 运行形态（已简化为常驻一种）
 
-| 形态 | 配置 | 适用 |
-|---|---|---|
-| 常驻 | 默认（`Type=notify`，内部自适应调度） | 需要秒级响应 |
-| 定时 | `alidns-ddns.timer` + `--once` | 偏好"无守护进程"，systemd 负责调度 |
-
-两者共用同一份代码，`--once` 只是把循环跑 1 次。
+早期方案曾考虑 `alidns-ddns.timer` + `--once` 定时模式，最终**已删除**：
+工具只有一个常驻循环（`Type=notify` + 内部自适应调度），不再提供 `--once` / timer 单元。
+状态持久化仍然保留——它让进程重启后无需重新全量对账。
 
 ### 6.3 邮件场景附注
 
@@ -473,8 +469,8 @@ CapabilityBoundingSet=
 | **P0 热修** | ② UTF-8 切片、⑥ 公网校验、③④⑤ 分页/线路/TTL、⑦ 错误不吞 | ~120 | 低 | 立刻消除崩溃与写错记录 |
 | **P1 选取** | netlink + 地址状态模型 + ULA 拒绝 + 单测 | ~330 | 中 | 解决 IPv6 轮换核心问题 |
 | **P2 对账** | 模块拆分、`plan`/`Outcome`、错误分类、退避、自适应调度、批量查询 | ~300 | 中 | API 调用降一个数量级，故障可自愈 |
-| **P3 运维** | 日志、`sd_notify` watchdog、`--once`/`--dry-run`、退出码、单元文件 | ~180 | 低 | 挂死可发现，配置错误不刷屏 |
-| **P4 已完成** | netlink 事件订阅（`RTMGRP_IPV6_IFADDR`）、状态持久化（原子写 `state.json`） | ~330 | 中 | 延迟从"一个周期"降到秒级；timer 模式也能跳过无变化查询 |
+| **P3 运维** | 日志、`sd_notify` watchdog、`--dry-run`、退出码、单元文件 | ~180 | 低 | 挂死可发现，配置错误不刷屏 |
+| **P4 已完成** | netlink 事件订阅（`RTMGRP_IPV6_IFADDR`）、状态持久化（原子写 `state.json`） | ~330 | 中 | 延迟从"一个周期"降到秒级；重启后跳过无变化查询 |
 
 建议顺序：P0 → P1 → P3 → P2 → P4。P3 提前做，是因为它能立刻改善线上可观测性，
 而 P2 的重构在可观测性到位后更好验证。
@@ -483,8 +479,8 @@ CapabilityBoundingSet=
 
 ## 8.1 状态持久化（P4 补充）
 
-`State` 与 IPv4 端点粘性原本都是内存态，导致 `--once` 定时器每拍都重新探测并全量查询 DNS
-（5 分钟一拍 ≈ 288 次读/天/域名），比常驻模式（6h 校验周期 ≈ 4 次/天/域名）反而更重。
+`State` 与 IPv4 端点粘性原本都是内存态，进程每次重启都会丢失，导致重启后重新全量探测与
+查询 DNS；常驻模式依赖 6h 校验周期（≈ 4 次读/天/域名）的缓存优势也无法跨重启保持。
 
 实现：`State::load/save_if_dirty` 把期望值缓存、连续失败数、变更时间、告警去重（24h TTL）、
 端点 URL 写入 `state.json`（`version` 字段 + 同目录临时文件 + `rename` 原子替换）。

@@ -100,7 +100,6 @@ pub struct Config {
     pub ttl: u64,
     pub ipv6_prefer: V6Prefer,
     pub allow_ula: bool,
-    pub once: bool,
     pub dry_run: bool,
     pub verbose: bool,
     pub events: bool,
@@ -131,7 +130,6 @@ pub struct Args {
     pub no_state: bool,
     pub on_change: Option<String>,
     pub on_change_timeout: Option<u64>,
-    pub once: bool,
     pub dry_run: bool,
     pub verbose: bool,
     pub no_events: bool,
@@ -168,7 +166,6 @@ IPv6 策略:
   --on-change-timeout <SECS>      钩子超时 (DDNS_ON_CHANGE_TIMEOUT, 默认 60)
 
 运行模式:
-  --once                          只执行一轮即退出（配合 systemd timer）
   --dry-run                       只打印计划，不调用写接口
   -v, --verbose                   输出候选地址与判定细节
   -c, --config <PATH>             配置文件路径（默认 config.json）
@@ -199,7 +196,6 @@ fn parse_args_from<I: Iterator<Item = String>>(mut it: I) -> Result<Args, String
             };
             match k {
                 "help" => a.help = true,
-                "once" => a.once = true,
                 "dry-run" => a.dry_run = true,
                 "verbose" => a.verbose = true,
                 "allow-ula" => a.allow_ula = true,
@@ -508,7 +504,6 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         ttl,
         ipv6_prefer,
         allow_ula: args.allow_ula || file.allow_ula || env_truthy("DDNS_ALLOW_ULA"),
-        once: args.once,
         dry_run: args.dry_run,
         verbose: args.verbose || env_truthy("DDNS_VERBOSE"),
         events: !args.no_events,
@@ -677,14 +672,13 @@ mod tests {
     #[test]
     fn flag_parsing_supports_inline_and_space() {
         let a = parse_args_from(
-            ["--domain=a.com", "--interval", "60", "--once"]
+            ["--domain=a.com", "--interval", "60"]
                 .into_iter()
                 .map(String::from),
         )
         .unwrap();
         assert_eq!(a.domain.as_deref(), Some("a.com"));
         assert_eq!(a.interval, Some(60));
-        assert!(a.once);
     }
 
     #[test]
