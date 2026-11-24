@@ -7,17 +7,24 @@
 > **⚠️ 第三方实现 | Third-Party Implementation**
 > 本项目为社区维护的第三方工具，**非**阿里云官方项目。与阿里云 DNS 服务的 API 交互基于公开文档实现。
 
-轻量级阿里云 DDNS 工具。**专注阿里云 DNS**，单文件 Rust 实现（~614 行），自动获取公网 IP 并更新解析记录。
+轻量级阿里云 DDNS 工具。**专注阿里云 DNS**，Rust 实现、无异步运行时、单二进制部署。
+采用 `observe → diff → apply → schedule` 对账循环，自动获取公网 IP 并更新解析记录。
 
 ## 功能特性
 
 - **仅支持阿里云 DNS** — 专注单一服务商，API 调用精简高效
-- **依赖极简** — 仅 ureq / serde / sha2 / hmac / local-ip-address 等少量依赖，无 tokio、无异步运行时，编译后二进制约 1.8MB，upx 压缩后约 900KB
-- 自动检测公网 IPv4（ipify 等多端点回退，适配大陆网络）和 IPv6（本地网卡）
-- **IPv6 优先选取全局可路由地址**，仅在不存在时兜底 ULA（`fc00::/7`），绝不采用 fe80 链接本地地址
-- 支持 A (IPv4) / AAAA (IPv6) / 双栈模式
-- 三种配置方式：命令行参数、环境变量、配置文件
-- 配置优先级：CLI > 环境变量 > 配置文件 > 默认值
+- **依赖极简** — ureq / serde / sha2 / hmac + Linux 下 neli（已在依赖树中）；无 tokio，编译后约 1.8MB，upx 压缩后约 900KB
+- 自动探测公网 IPv4（5 个端点回退 + 端点粘性 + 公网性校验，适配大陆网络）
+- **IPv6 按 RFC 4862/4941 选取**：Linux 用 netlink 读取 `IFA_FLAGS` + `IFA_CACHEINFO`，macOS 解析 `ifconfig -a -L`；
+  区分 preferred / deprecated / tentative / 临时地址，按 `cstamp`（macOS 用 `valid_lft`）取最新；
+  **ULA 默认拒绝**（公网不可达），fe80/回环/组播一律排除
+- **对账式更新**：按域名批量查询（`PageSize=500` 自动翻页）、精确匹配 `RR + 线路 + 类型`、显式写 TTL，
+  IP 未变且未到校验周期时完全不查 DNS
+- **状态持久化**：`state.json` 原子落盘，跨重启保留期望值缓存/退避/告警去重/IPv4 端点粘性
+- **故障自愈**：错误分类 + 指数退避（30s→5min）+ 鉴权错误退出 78（不再无效重启）+ systemd watchdog
+- **IP 变更钩子** `--on-change`：A/AAAA 真正写入后执行外部命令，支持 reload 邮件服务 / 通知 acme.sh
+- 支持 A (IPv4) / AAAA (IPv6) / 双栈模式；常驻进程与 systemd timer 两种运行形态
+- 三种配置方式：命令行参数、环境变量、配置文件；优先级 CLI > 环境变量 > 配置文件 > 默认值
 - ACS3-HMAC-SHA256 V3 签名认证
 - 服务支持：Linux systemd / macOS launchd，开机自启
 - 支持 Linux（x86_64 / ARM64）与 macOS（Intel / Apple Silicon）
@@ -38,7 +45,8 @@
 3. 点击 **创建 AccessKey**
 4. 记录 **AccessKey ID** 和 **AccessKey Secret**（Secret 仅创建时显示一次）
 
-> **安全建议**: 推荐使用 RAM 子用户的 AccessKey，仅授予 `AliyunDNSFullAccess` 权限，避免使用主账号 AK。
+> **安全建议**: 按本项目约定，不使用子用户 AccessKey；请为专用账号授予 DNS 管理权限（`alidns:*`），
+> 并优先通过环境变量 / systemd `LoadCredential` 传递凭证，不要写进 world-readable 的 `config.json`。
 
 ### 3. 配置 DNS 解析（可选）
 
@@ -131,16 +139,32 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
 
 ## 配置说明
 
-| 参数 | 环境变量 | 说明 | 默认值 |
-|------|---------|------|--------|
-| `--access-key-id` | `ALIBABA_CLOUD_ACCESS_KEY_ID` | AccessKey ID | 必填 |
-| `--access-key-secret` | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | AccessKey Secret | 必填 |
-| `--domain` | `ALIDNS_DOMAIN` | 域名（如 `example.com`，多个用逗号分隔） | 必填 |
-| `--rr` | `ALIDNS_RR` | 主机记录（如 `@`、`www`，多个用逗号分隔） | `@` |
-| `--ipv` | `DDNS_IPV` | IP 模式：`4`=仅IPv4 / `6`=仅IPv6 / `46`=双栈 | `6` |
-| `--interval` | `DDNS_INTERVAL` | 更新间隔（秒），最小 1 | `3600` |
-| `--interface` | `ALIDNS_INTERFACE` | 指定网卡以获取本地 IPv6（留空自动搜索） | 空（自动搜索） |
-| `-c, --config` | — | 配置文件路径 | `config.json` |
+| 参数 | 环境变量 | config.json | 说明 | 默认值 |
+|------|---------|-------------|------|--------|
+| `--access-key-id` | `ALIBABA_CLOUD_ACCESS_KEY_ID` | `AccessKeyID` | AccessKey ID | 必填 |
+| `--access-key-secret` | `ALIBABA_CLOUD_ACCESS_KEY_SECRET` | `AccessKeySecret` | AccessKey Secret | 必填 |
+| `--domain` | `ALIDNS_DOMAIN` | `DomainName` | 域名（多个用逗号分隔） | 必填 |
+| `--rr` | `ALIDNS_RR` | `RR` | 主机记录（多个用逗号分隔） | `@` |
+| `--ipv` | `DDNS_IPV` | `IPv` | `4` / `6` / `46` | `6` |
+| `--interval` | `DDNS_INTERVAL` | `Interval` | 唤醒间隔（秒），1–2592000 | `300` |
+| `--verify-interval` | `DDNS_VERIFY_INTERVAL` | `VerifyInterval` | IP 未变时的 DNS 对账周期（秒） | `21600` |
+| `--ttl` | `DDNS_TTL` | `Ttl` | 写入记录的 TTL（秒） | `600` |
+| `--line` | `DDNS_LINE` | `Line` | 解析线路 | `default` |
+| `--interface` | `ALIDNS_INTERFACE` | `Interface` | 指定获取 IPv6 的网卡，留空自动 | 空 |
+| `--ipv6-prefer` | `ALIDNS_IPV6_PREFER` | `Ipv6Prefer` | `auto` / `stable` / `temporary` | `auto` |
+| `--allow-ula` | `DDNS_ALLOW_ULA` | `AllowUla` | 允许把 ULA 写进 AAAA（默认拒绝） | false |
+| `--state-file` | `DDNS_STATE_FILE` | `StateFile` | 状态文件路径 | `$STATE_DIRECTORY/state.json` 等 |
+| `--no-state` | — | — | 禁用状态持久化 | false |
+| `--on-change` | `DDNS_ON_CHANGE` | `OnChange` | IP 变更后执行的命令 | 无 |
+| `--on-change-timeout` | `DDNS_ON_CHANGE_TIMEOUT` | `OnChangeTimeout` | 钩子超时（秒），1–3600 | `60` |
+| `--no-events` | — | — | 关闭 Linux netlink 地址变更订阅 | false |
+| `--once` | — | — | 只跑一轮（配合 systemd timer） | false |
+| `--dry-run` | — | — | 只打印计划，不写 API、不执行钩子、不写状态 | false |
+| `-v, --verbose` | `DDNS_VERBOSE` | — | 输出候选地址与判定细节 | false |
+| `-c, --config` | — | — | 配置文件路径 | `config.json` |
+
+配置解析失败会**快速失败并退出 78**（不再静默用默认值），systemd 配置
+`RestartPreventExitStatus=78`，避免配置错误导致无限重启刷屏。
 
 ### 配置示例
 
@@ -160,7 +184,7 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
 
 效果：仅更新 `api.example.com` 的 AAAA 记录。
 
-**场景 4: 单进程维护多个域名（解析到同一个 IP）**
+**场景 3: 单进程维护多个域名（解析到同一个 IP）**
 
 ```bash
 ./alidns-ddns --domain example.com,example.net --rr @,www --ipv 46
@@ -174,7 +198,7 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
 
 效果：所有域名共享同一次公网 IP 探测结果，各自更新 / 新建对应的 A 与 AAAA 记录。域名数与 RR 数一对多、多对一或等长时自动配对，否则报错退出。
 
-**场景 3: 高频更新（最小间隔）**
+**场景 4: 高频更新（最小间隔）**
 
 ```bash
 ./alidns-ddns --domain example.com --rr @ --ipv 4 --interval 1
@@ -191,52 +215,112 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
     "DomainName": "example.com",
     "RR": "@",
     "IPv": "6",
-    "Interval": 3600
+    "Interval": 300,
+    "VerifyInterval": 21600,
+    "Ttl": 600,
+    "Line": "default",
+    "Ipv6Prefer": "auto",
+    "AllowUla": false,
+    "StateFile": "",
+    "OnChange": "",
+    "OnChangeTimeout": 60
 }
 ```
 
 ## 工作原理
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  ipify API  │────▶│  alidns-ddns │────▶│  阿里云 DNS API  │
-│  (IPv4)     │     │              │     │  (Update/Add)   │
-└─────────────┘     │  每 N 秒循环  │     └─────────────────┘
-                    │              │
-┌─────────────┐     │  检测 IP 变化 │
-│  本地网卡    │────▶│              │
-│  (IPv6)     │     └──────────────┘
-└─────────────┘
+        ┌─────────────────────┐
+        │ observe()           │  公网 IPv4（HTTP 端点回退 + 公网性校验）
+        │                     │  本机 IPv6（netlink / ifconfig -L + 生命周期）
+        └──────────┬──────────┘
+                   ▼
+        ┌─────────────────────┐
+        │ plan::diff()        │  纯函数：desired vs DNS actual → 动作
+        └──────────┬──────────┘
+                   ▼
+        ┌─────────────────────┐
+        │ apply()             │  幂等 Update/Add + 错误分类
+        └──────────┬──────────┘
+                   ▼
+        ┌─────────────────────┐
+        │ schedule()          │  自适应唤醒 / 退避 / netlink 事件
+        └─────────────────────┘
 ```
 
-1. 每隔 N 秒，通过公网 IP 探测端点获取当前 IPv4：先试 [ipify](https://api.ipify.org/)，不可达时依次回退 `v4.ident.me` → `ip.3322.net` → `ipv4.icanhazip.com` → `checkip.amazonaws.com`（单请求 8 秒超时）
-2. 通过本地网卡枚举获取 IPv6 地址（使用 [`local-ip-address`](https://crates.io/crates/local-ip-address)），**优先选取全局可路由地址，仅在不存在时兜底 ULA**；排除回环与 fe80 链接本地地址（公网不可达）
-3. 调用阿里云 DNS API（`DescribeDomainRecords`）查询现有记录
-4. 对比 IP 是否变化，变化时调用 `UpdateDomainRecord` 或 `AddDomainRecord` 更新
-5. API 认证采用 ACS3-HMAC-SHA256 签名（阿里云 V3 签名机制）
+1. **发现**：IPv4 通过 `api.ipify.org` → `v4.ident.me` → `ip.3322.net` → `ipv4.icanhazip.com` → `checkip.amazonaws.com`
+   串行回退（8s 超时、记住上次成功端点）；结果必须是公网地址，私网 / CGNAT / 组播等一律拒绝。
+   IPv6 在 Linux 走 netlink `RTM_GETADDR`，在 macOS 走 `ifconfig -a -L`，均带地址状态与生命周期。
+2. **对账**：每个域名一次 `DescribeDomainRecords`（`PageSize=500` 自动翻页），按 `RR + Line + Type` 精确匹配；
+   期望值未变且未到 `verify-interval` 时跳过查询。同时处理 `Status=Disable` / `Locked` / 重复记录。
+3. **写入**：值不同才 `UpdateDomainRecord` / `AddDomainRecord`，显式带 `TTL` 与 `Line`；
+   写入成功后记录状态、执行 `--on-change` 钩子。
+4. **调度**：默认 300s；刚变更后 60s 内复查；`preferred_lft` 过半前提前唤醒；失败指数退避 30s→5min；
+   Linux 订阅 `RTMGRP_IPV6_IFADDR` 地址变更事件，秒级唤醒。
+5. **凭证与签名**：ACS3-HMAC-SHA256（V3），签名 Key 为 AccessKeySecret；查询串与头部的百分号编码用大写十六进制。
+
+详细设计见 [`docs/ddns-redesign.md`](docs/ddns-redesign.md)；IPv6 选取依据见
+[`docs/ipv6-address-selection.md`](docs/ipv6-address-selection.md)。
+
+## IP 变化钩子（邮件服务器场景）
+
+A/AAAA 真正写入后，`--on-change` 指定的命令会被同步执行（带超时）。可用环境变量：
+`DDNS_CHANGED=1`、`DDNS_CHANGED_COUNT`、`DDNS_CHANGED_TARGETS`、`DDNS_IPV4`、`DDNS_IPV6`。
+钩子失败只告警，不影响 DNS 与退出码；`--dry-run` 不执行。
+
+> Linux 服务以 `DynamicUser` + 空 capability + `ProtectSystem=strict` 运行，钩子**没有权限直接 reload postfix**。
+> 仓库提供了"标志文件 + root path 单元"的完整样例：
+
+```bash
+# 1) 安装钩子脚本（在 StateDirectory 里写变更日志并 touch 标志文件）
+sudo install -m 0755 examples/ddns-changed.sh /usr/local/bin/ddns-changed
+
+# 2) 在 /etc/alidns-ddns/env 中启用
+echo 'DDNS_ON_CHANGE=/usr/local/bin/ddns-changed' | sudo tee -a /etc/alidns-ddns/env
+
+# 3) 安装 root 单元：监听标志文件并 reload 邮件服务
+sudo cp examples/alidns-ddns-reload.path examples/alidns-ddns-reload.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now alidns-ddns-reload.path
+sudo systemctl restart alidns-ddns
+```
+
+标志文件位于 `/var/lib/private/alidns-ddns/ip-changed.flag`（`StateDirectory` 在 DynamicUser 下的实际路径），
+变更日志在同目录的 `ip-change.log`。按需修改 `alidns-ddns-reload.service` 中的 `ExecStart`。
+
+钩子继承服务进程的环境变量（含 `ALIBABA_CLOUD_ACCESS_KEY_SECRET`，便于 acme.sh 复用），只应配置可信命令。
 
 ## 文件结构
 
 ```
 alidns-ddns/
-├── src/main.rs           # 主程序（单文件，~614 行）
-├── Cargo.toml            # 项目配置
-├── config.example.json   # 配置文件模板
-├── env.example           # 环境变量模板
-├── alidns-ddns.service   # systemd 服务文件（Linux）
-├── alidns-ddns.plist     # launchd 用户级服务模板（macOS，install.sh sed 填充路径）
-├── alidns-ddns-daemon.plist  # launchd 系统级服务模板（macOS，sudo 安装）
-├── install.sh            # 安装脚本（自动检测 Linux / macOS，root/普通用户分模式）
-├── LICENSE               # Apache-2.0 许可证
-├── CONTRIBUTING.md       # 贡献指南
-└── SECURITY.md           # 安全策略
+├── src/
+│   ├── main.rs               # 主循环、sd_notify、调度、钩子触发
+│   ├── config.rs             # 参数 / 环境变量 / 配置文件解析与校验
+│   ├── plan.rs               # 纯函数：期望值 vs DNS 记录 → 动作
+│   ├── select.rs             # 纯函数：IPv6 地址选取
+│   ├── state.rs              # 状态缓存 / 退避 / 原子落盘
+│   ├── hook.rs               # IP 变更钩子（带超时）
+│   ├── log.rs / util.rs      # 日志、UTF-8 安全截断、公网地址判定
+│   ├── discover/             # 公网 IPv4 探测 + IPv6 枚举（Linux netlink / macOS ifconfig）
+│   └── aliyun/               # ACS3 签名、响应模型、分页查询与错误分类
+├── docs/                     # 重构方案与 IPv6 选取规范
+├── examples/                 # on-change 钩子 + root reload 单元样例
+├── Cargo.toml
+├── config.example.json / env.example
+├── alidns-ddns.service / alidns-ddns-once.service / alidns-ddns.timer
+├── alidns-ddns.plist / alidns-ddns-daemon.plist   # macOS launchd 模板
+├── install.sh                # 自动检测 Linux / macOS，root/普通用户分模式
+├── LICENSE / CONTRIBUTING.md / SECURITY.md
 ```
 
 ## 安全说明
 
 - **切勿**将包含真实 AccessKey 的 `config.json` 提交到版本控制
-- 推荐使用 RAM 子账号，仅授予 `AliyunDNSFullAccess` 权限
-- 生产环境 Linux 建议使用 `EnvironmentFile` 管理凭证；macOS 使用 `~/.config/alidns-ddns/config.json` 并保持 `chmod 600`
+- 按项目约定**不使用子用户 AccessKey**；为专用账号授予 DNS 管理权限（`alidns:*`）
+- 生产环境 Linux 优先用 `EnvironmentFile`（600）或 systemd `LoadCredential` 传递凭证；
+  `config.json` 因 DynamicUser 需要可读而保持 644，因此不应写入真实 Secret
+- `--on-change` 命令继承环境变量，只应配置可信脚本
 
 ## 贡献
 

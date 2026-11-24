@@ -90,7 +90,8 @@ API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `Access
 - `config.json` 含占位凭证，**勿提交真实 Key 到仓库**
 - 需要阿里云 DNS 管理权限（`alidns:*`）
 - on-change 钩子以服务自身权限运行（Linux 单元是 DynamicUser + 无 capability + 只读文件系统），
-  不能直接 reload root 服务；需要时让钩子写一个 StateDirectory 内的标志文件，由另一个 root 单元监听。
+  不能直接 reload root 服务；`examples/ddns-changed.sh` + `examples/alidns-ddns-reload.path/.service`
+  提供了"写 StateDirectory 标志文件 → root 单元 reload postfix/dovecot"的完整样例（README 有安装步骤）。
   钩子继承环境变量（含 ALIBABA_CLOUD_ACCESS_KEY_SECRET，供 acme.sh 复用），只应配置可信命令
 - 退出码：`78` = 配置/鉴权错误（systemd `RestartPreventExitStatus=78` 不再重启），`2` = 参数错误，`1` = `--once` 单轮失败，`0` = 正常
 - 配置解析失败现在快速失败（退出 78），不再静默用默认值

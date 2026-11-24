@@ -1,0 +1,11 @@
+[Unit]
+Description=Reload mail services after AliDNS DDNS IP change
+Documentation=https://github.com/tongtf/alidns-ddns
+
+[Path]
+# 由 examples/ddns-changed.sh 在 StateDirectory 中 touch
+PathChanged=/var/lib/private/alidns-ddns/ip-changed.flag
+Unit=alidns-ddns-reload.service
+
+[Install]
+WantedBy=multi-user.target

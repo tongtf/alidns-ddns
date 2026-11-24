@@ -1,0 +1,9 @@
+[Unit]
+Description=Reload Postfix and Dovecot after dynamic IP change
+After=network-online.target
+
+[Service]
+Type=oneshot
+# 只reload，不restart：避免中断正在进行的邮件投递/IMAP 会话
+ExecStart=/usr/bin/systemctl reload postfix
+ExecStart=/usr/bin/systemctl reload dovecot

@@ -1,9 +1,10 @@
 # IPv6 地址选取设计：区分临时/稳定地址，并在轮换期选新弃旧
 
-状态：草案
-影响文件：`src/main.rs`（`get_ipv6` / `select_ipv6` / `Config`）
-依赖变化：`neli` 提为直接依赖（已在依赖树中，不新增编译单元；Linux 上可移除
-`local-ip-address`，净减少一个 crate）
+状态：已实现（Linux 用 netlink，macOS 用 `ifconfig -a -L`）
+实现文件：`src/select.rs`（纯函数选取）、`src/discover/ipv6.rs`（Linux netlink）、
+`src/discover/ipv6_macos.rs`（macOS ifconfig 解析）、`src/config.rs`（`--ipv6-prefer` / `--allow-ula`）
+依赖变化：`neli` 提为 Linux 直接依赖（本就在依赖树中）；Linux 移除 `local-ip-address`，
+macOS 保留作为 `ifconfig` 解析失败时的回退
 
 ---
 
@@ -196,8 +197,11 @@ typed struct，需手工解 12 字节。
   按 `ifaddrmsg` + 属性组装 `V6Cand`。
 - **netlink 不可用**（容器 seccomp 等）→ 回退 `kernel_source_addr()`（UDP connect
   取内核源地址，单候选），打 warning 说明判据不足。
-- **macOS/BSD**：无 netlink。保持现有 `local-ip-address` 行为（不区分类别），
-  启动时告警一次；依赖按平台声明（`[target.'cfg(...)'.dependencies]`）。
+- **macOS**：无 netlink，但 `/sbin/ifconfig -a -L` 提供 `temporary` / `deprecated` /
+  `tentative` / `dadfailed` / `permanent` 标志与 `pltime` / `vltime` 剩余寿命。
+  `src/discover/ipv6_macos.rs` 用 `std::process::Command` 解析（零新增依赖），映射到同一套
+  `V6Cand`；`ifconfig` 不可用时告警并回退 `local-ip-address`。
+- **其他非 Linux/macOS**：无 netlink 也无 ifconfig 解析器，回退 `local-ip-address`（不分类别）。
 - **D 仅作 tie-break**：**不能只用 D**，`use_tempaddr=2` 时内核会优先选临时地址。
 
 ## 5. 数据结构与解析
@@ -318,7 +322,9 @@ seq_printf(seq, "%pi6 %02x %02x %02x %02x %8s\n",
 - 行数通常 < 20，每次全量读取，无性能问题
 - 读取失败（容器限制、非 Linux）→ 回退旧逻辑 + 告警，**不可 panic**
 
-macOS 分支：无 `/proc`，保持现有 `local-ip-address` 行为（不分类别），启动时告警一次。
+macOS 分支：`ifconfig -a -L` 文本按"接口头行 + `inet6` 缩进行"解析，`pltime`/`vltime`
+直接作为生命周期，关键字映射到地址状态；失败回退 `local-ip-address` 并告警。
+macOS 没有 `cstamp`，同桶排序退化为比较 `valid_lft`（新 SLAAC 地址寿命更长）。
 
 ## 6. 选择算法
 
@@ -423,7 +429,7 @@ T0+2d       : A 被内核删除              -> 无影响
 | 13 | 接口 down / 链路抖动 | 地址消失 → 跳过本轮，保留旧记录 |
 | 14 | 容器内仅 lo | 跳过 + 告警 |
 | 15 | netlink 不可用（容器 seccomp）/ dump 失败 | 回退 UDP-connect 单候选 + 告警（不崩） |
-| 16 | macOS 无 netlink | 保持现有 `local-ip-address` 行为 + 启动告警一次；不分类别 |
+| 16 | macOS 无 netlink | 解析 `ifconfig -a -L` 拿到标志与 pltime/vltime，复用同一选取算法；失败回退 + 告警 |
 | 17 | 读取与 API 调用之间地址变更 | §7.1 重读 |
 | 18 | IPv6 被内核禁用 | 返回空，跳过 |
 | 19 | 记录类型为 CNAME 或存在多条 AAAA | 沿用现有 `update_dns` 语义（取第一条匹配），本次不改 |
