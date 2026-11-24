@@ -58,8 +58,11 @@ KeyringMode=private
 # --- 仅放行必要的网络地址族（HTTPS + netlink 地址读取 + NOTIFY_SOCKET） ---
 RestrictAddressFamilies=AF_NETLINK AF_LOCAL AF_INET AF_INET6
 
-# 可选（systemd >= 247）：用凭据代替环境文件，避免密钥出现在任何可读文件里
-#LoadCredential=alidns-env:/etc/alidns-ddns/env
+# 推荐（systemd >= 247）：AK/SK 由凭据文件注入（优先级高于 EnvironmentFile）
+# 先创建 /etc/alidns-ddns/access_key_id 与 access_key_secret（root:root 600）
+# 详见 README「用 systemd LoadCredential 传递凭证」
+#LoadCredential=alidns-access-key-id:/etc/alidns-ddns/access_key_id
+#LoadCredential=alidns-access-key-secret:/etc/alidns-ddns/access_key_secret
 
 [Install]
 WantedBy=multi-user.target

@@ -161,15 +161,18 @@ fn notify(state: &str) {
 现有约定：`config.json` 644（`DynamicUser` 临时 UID 需要可读）、`env` 600。
 这是自相矛盾的：**最敏感的两个字段（AK/SK）被允许写在 world-readable 文件里**。
 
-建议改用 systemd 凭据（≥ 247）：
+已实现 systemd 凭据（≥ 247）：用两个独立凭据文件传 AK/SK，而不是把整个 env 文件
+塞进一个凭据（那样仍需要程序解析 KEY=VALUE）。
 
 ```ini
-LoadCredential=alidns-env:/etc/alidns-ddns/env
-EnvironmentFile=-/etc/alidns-ddns/env
+LoadCredential=alidns-access-key-id:/etc/alidns-ddns/access_key_id
+LoadCredential=alidns-access-key-secret:/etc/alidns-ddns/access_key_secret
 ```
 
-或直接规定 `AccessKeySecret` **只能**来自环境变量/凭据，`config.json` 中出现非空
-secret 时打 warning 并忽略（配合 `chmod 600` + 专用静态用户 `User=alidns`）。
+`config.rs` 从 `$CREDENTIALS_DIRECTORY/<name>` 读取并 trim，优先级为
+**CLI > LoadCredential > 环境变量 > config.json**。源文件保持 root:root 600，
+由 systemd 以 root 读取后挂载，服务进程（DynamicUser）无需自己读源文件。
+`config.json` 中的 Secret 仍可用，但会打 warning。
 
 另外：`--access-key-secret` 会出现在 `/proc/<pid>/cmdline`，建议标记为 deprecated。
 
@@ -420,8 +423,9 @@ RestartPreventExitStatus=78
 StateDirectory=alidns-ddns
 UMask=0077
 CapabilityBoundingSet=
-# 可选（systemd >= 247）
-# LoadCredential=env:/etc/alidns-ddns/env
+# 可选（systemd >= 247），见 2.4 节
+# LoadCredential=alidns-access-key-id:/etc/alidns-ddns/access_key_id
+# LoadCredential=alidns-access-key-secret:/etc/alidns-ddns/access_key_secret
 ```
 
 `RestartPreventExitStatus=78` 是关键：配置/鉴权错误进 `failed` 状态而不是无限重启，
