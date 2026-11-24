@@ -115,7 +115,7 @@ jobs:
           body: |
             ## alidns-ddns ${{ github.ref_name }}
 
-            轻量级阿里云 DDNS 工具 — 单文件 Rust 实现，专注阿里云 DNS。
+            轻量级阿里云 DDNS 工具 — Rust 实现、无异步运行时、对账式更新引擎，专注阿里云 DNS。
 
             ### 下载
 
