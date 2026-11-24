@@ -89,6 +89,8 @@ impl V6Prefer {
 }
 
 pub struct Config {
+    /// 本次加载的配置文件路径（启动自检日志用）
+    pub config_path: PathBuf,
     pub access_key_id: String,
     pub access_key_secret: String,
     pub targets: Vec<Target>,
@@ -471,6 +473,7 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
     };
 
     Ok(Config {
+        config_path: PathBuf::from(&path),
         access_key_id: access_key_id.trim().to_string(),
         // 环境变量 / 配置文件里常见的尾随空白会导致 InvalidSignature
         access_key_secret: access_key_secret.trim().to_string(),

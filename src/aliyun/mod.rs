@@ -18,6 +18,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const PAGE_SIZE: u64 = 500;
 /// 翻页上限，防止 `TotalCount` 异常导致死循环。
 const MAX_PAGES: u64 = 20;
+/// 启动自检日志引用，避免和真正调用的接口名漂移
+pub const API_LIST_RECORDS: &str = "DescribeDomainRecords";
 
 #[derive(Debug)]
 pub enum ApiError {
@@ -124,7 +126,7 @@ impl Client {
             p.insert("PageNumber".to_string(), page.to_string());
             p.insert("PageSize".to_string(), PAGE_SIZE.to_string());
 
-            let body = self.call("DescribeDomainRecords", p)?;
+            let body = self.call(API_LIST_RECORDS, p)?;
             let parsed: ListResp = serde_json::from_str(&body).map_err(|e| {
                 ApiError::Transport(format!(
                     "DescribeDomainRecords 响应解析失败: {e}; 原始响应: {}",

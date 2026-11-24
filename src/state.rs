@@ -172,6 +172,23 @@ impl State {
         s
     }
 
+    /// 启动自检：确认状态文件父目录存在且可写（写一个临时探针再删除）。
+    /// 持久化被禁用时视为通过，不做任何磁盘操作。
+    pub fn check_writable(&self) -> Result<(), String> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("创建状态目录 {} 失败: {e}", parent.display()))?;
+            }
+        }
+        let probe = path.with_extension(format!("selftest-{}", std::process::id()));
+        fs::write(&probe, b"").map_err(|e| format!("状态文件不可写 {}: {e}", path.display()))?;
+        fs::remove_file(&probe).map_err(|e| format!("清理自检探针失败 {}: {e}", probe.display()))
+    }
+
     /// 有变更才落盘；原子替换避免定时器与常驻进程交替运行时读到半截 JSON。
     pub fn save_if_dirty(&mut self) {
         if !self.dirty {
@@ -480,6 +497,20 @@ mod tests {
         assert!((3400..=3800).contains(&changed_ago), "{changed_ago}");
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn check_writable_creates_parent_and_cleans_up() {
+        let path = std::env::temp_dir()
+            .join(format!("alidns-state-selftest-{}", std::process::id()))
+            .join("state.json");
+        let s = State::load(Some(path.clone()));
+        s.check_writable().unwrap();
+        assert!(path.parent().unwrap().exists());
+        assert!(!path
+            .with_extension(format!("selftest-{}", std::process::id()))
+            .exists());
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]
