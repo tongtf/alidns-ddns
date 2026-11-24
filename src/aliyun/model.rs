@@ -4,6 +4,11 @@ use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
 pub struct ListResp {
+    // 业务错误也可能以 HTTP 200 返回；不检查会把"查询失败"当成"没有记录"从而新建重复记录
+    #[serde(rename = "Code", default)]
+    pub code: Option<String>,
+    #[serde(rename = "Message", default)]
+    pub message: Option<String>,
     #[serde(rename = "TotalCount", default)]
     pub total: u64,
     #[serde(rename = "PageNumber", default)]

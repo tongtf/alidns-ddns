@@ -68,7 +68,8 @@ pub fn diff(targets: &[&Target], desired: &Desired, records: &[Record], ttl: u64
         let matched: Vec<&Record> = records
             .iter()
             .filter(|r| {
-                r.rr == t.rr
+                // DNS 的 RR 不区分大小写，别因为阿里云返回 "WWW" 而误判为缺失
+                r.rr.eq_ignore_ascii_case(&t.rr)
                     && r.rtype.eq_ignore_ascii_case(t.rtype.as_str())
                     && r.line_or_default().eq_ignore_ascii_case(&t.line)
             })
@@ -269,6 +270,14 @@ mod tests {
         let t = target("@", "default", RType::Aaaa);
         let r = record("@", "default", "AAAA", "2408:0:0:0:0:0:0:1");
         let steps = diff(&[&t], &desired(None, Some("2408::1")), &[r], 600);
+        assert!(matches!(steps[0].kind, StepKind::InSync { .. }));
+    }
+
+    #[test]
+    fn rr_is_case_insensitive() {
+        let t = target("WWW", "default", RType::A);
+        let r = record("www", "default", "A", "1.1.1.1");
+        let steps = diff(&[&t], &desired(Some("1.1.1.1"), None), &[r], 600);
         assert!(matches!(steps[0].kind, StepKind::InSync { .. }));
     }
 

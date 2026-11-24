@@ -376,8 +376,9 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
     };
 
     let interval = pick_u64(args.interval, "DDNS_INTERVAL", file.interval, 300)?;
-    if interval == 0 {
-        return Err("--interval 必须 ≥ 1".into());
+    // 上界防止 `Instant::now() + Duration` 溢出（release profile 是 panic=abort）
+    if !(1..=2_592_000).contains(&interval) {
+        return Err("--interval 取值范围 1..2592000（30 天），收到: {interval}".into());
     }
     let verify_interval = pick_u64(
         args.verify_interval,
@@ -385,8 +386,8 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         file.verify_interval,
         21_600,
     )?;
-    if verify_interval == 0 {
-        return Err("--verify-interval 必须 ≥ 1".into());
+    if !(1..=31_536_000).contains(&verify_interval) {
+        return Err("--verify-interval 取值范围 1..31536000（1 年），收到: {verify_interval}".into());
     }
     let ttl = pick_u64(args.ttl, "DDNS_TTL", file.ttl, 600)?;
     if !(1..=86_400).contains(&ttl) {

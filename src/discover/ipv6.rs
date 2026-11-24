@@ -19,6 +19,17 @@ const IFA_F_DEPRECATED: u32 = 0x20;
 const IFA_F_TENTATIVE: u32 = 0x40;
 const IFA_F_PERMANENT: u32 = 0x80;
 
+/// 从 netlink `IFA_ADDRESS` 属性负载解析 IPv6（网络字节序的 16 字节）。
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn decode_addr(bytes: &[u8]) -> Option<Ipv6Addr> {
+    if bytes.len() < 16 {
+        return None;
+    }
+    let mut b = [0u8; 16];
+    b.copy_from_slice(&bytes[..16]);
+    Some(Ipv6Addr::from(b))
+}
+
 /// 解析 `struct ifa_cacheinfo { u32 ifa_prefered; u32 ifa_valid; u32 cstamp; }`。
 /// 三个字段均为 native-endian；`0xFFFFFFFF` 表示永久，归一化成 `u64::MAX`。
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -99,9 +110,9 @@ pub fn scan() -> Result<Vec<V6Cand>, String> {
         for a in p.rtattrs().iter() {
             match *a.rta_type() {
                 Ifa::Address => {
-                    if let Ok(v) = a.get_payload_as::<u128>() {
-                        addr = Some(Ipv6Addr::from(u128::from_be(v)));
-                    }
+                    // 直接按字节解析：netlink 里 in6_addr 就是 16 字节网络序，
+                    // 不依赖 neli u128 的 NativeEndian 行为（大端机器也正确）。
+                    addr = decode_addr(a.payload().as_ref());
                 }
                 Ifa::Flags => {
                     if let Ok(v) = a.get_payload_as::<u32>() {
@@ -116,6 +127,8 @@ pub fn scan() -> Result<Vec<V6Cand>, String> {
         }
 
         let Some(addr) = addr else { continue };
+        let preferred = cache.map(|c| c.0).unwrap_or(u64::MAX);
+        let valid = cache.map(|c| c.1).unwrap_or(u64::MAX);
         out.push(V6Cand {
             ifindex,
             ifname: names
@@ -128,15 +141,15 @@ pub fn scan() -> Result<Vec<V6Cand>, String> {
             } else {
                 V6Kind::Stable
             },
-            state: if flags & IFA_F_DEPRECATED != 0 {
+            state: if flags & IFA_F_DEPRECATED != 0 || preferred == 0 {
                 V6State::Deprecated
             } else {
                 V6State::Preferred
             },
             usable: flags & (IFA_F_OPTIMISTIC | IFA_F_DADFAILED | IFA_F_TENTATIVE) == 0,
             permanent: flags & IFA_F_PERMANENT != 0,
-            preferred_lft: cache.map(|c| c.0).unwrap_or(u64::MAX),
-            valid_lft: cache.map(|c| c.1).unwrap_or(u64::MAX),
+            preferred_lft: preferred,
+            valid_lft: valid,
             cstamp: cache.map(|c| c.2).unwrap_or(0),
         });
     }
@@ -264,6 +277,18 @@ pub fn cand_from_flags(addr: Ipv6Addr, flags: u32, cache: Option<(u64, u64, u32)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn address_decodes_network_order() {
+        let bytes = [
+            0x20, 0x01, 0x0d, 0xf1, 0x78, 0x80, 0x01, 0x00, 0, 0, 0, 0, 0, 0, 0x04, 0xc3,
+        ];
+        assert_eq!(
+            decode_addr(&bytes),
+            Some("2001:df1:7880:100::4c3".parse().unwrap())
+        );
+        assert_eq!(decode_addr(&bytes[..15]), None);
+    }
 
     #[test]
     fn cacheinfo_decodes() {

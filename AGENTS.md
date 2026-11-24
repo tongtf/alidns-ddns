@@ -62,7 +62,7 @@ cargo clippy                 # lint（无预配置的门控）
 upx --best target/release/alidns-ddns  # 可选压缩
 ```
 
-无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（53 个单测）。
+无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（60 个单测）。
 
 ## 关键行为
 

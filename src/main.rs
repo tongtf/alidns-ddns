@@ -176,6 +176,8 @@ fn sync(
     let verify = Duration::from_secs(cfg.verify_interval);
 
     for (domain, targets) in by_domain {
+        // 域名很多时单轮可能超过 watchdog 窗口，逐个域名喂狗
+        notify("WATCHDOG=1");
         // 期望值未变且距上次校验未超 verify-interval 时完全跳过 DNS 查询。
         let need: Vec<&Target> = targets
             .iter()
@@ -194,7 +196,7 @@ fn sync(
             Err(e) if e.fatal() => return Err(e),
             Err(e) => {
                 log::warn(format!("读取 {domain} 的记录失败：{e}"));
-                if first_err.is_none() {
+                if !matches!(e, ApiError::Param(_)) && first_err.is_none() {
                     first_err = Some(e);
                 }
                 continue;
@@ -234,7 +236,7 @@ fn sync(
                         Err(e) if e.fatal() => return Err(e),
                         Err(e) => {
                             log::warn(format!("更新 {} 失败：{e}", step.target));
-                            if first_err.is_none() {
+                            if !matches!(e, ApiError::Param(_)) && first_err.is_none() {
                                 first_err = Some(e);
                             }
                         }
@@ -256,7 +258,7 @@ fn sync(
                         Err(e) if e.fatal() => return Err(e),
                         Err(e) => {
                             log::warn(format!("新建 {} 失败：{e}", step.target));
-                            if first_err.is_none() {
+                            if !matches!(e, ApiError::Param(_)) && first_err.is_none() {
                                 first_err = Some(e);
                             }
                         }

@@ -6,6 +6,8 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# 与常驻单元保持一致：以动态临时用户运行，避免 root 持有状态文件
+DynamicUser=yes
 ExecStart=/usr/local/bin/alidns-ddns --config /etc/alidns-ddns/config.json --once
 EnvironmentFile=/etc/alidns-ddns/env
 

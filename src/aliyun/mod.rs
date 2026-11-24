@@ -126,12 +126,25 @@ impl Client {
                 ))
             })?;
 
+            if let Some(code) = parsed.code.as_deref().filter(|c| !c.is_empty()) {
+                return Err(classify_code(
+                    code,
+                    parsed.message.as_deref().unwrap_or(""),
+                ));
+            }
+
             let got = parsed.records.record.len() as u64;
             log::debug(format!(
                 "{domain}: 第 {} 页 {} 条, TotalCount={}, RequestId={}",
                 parsed.page, got, parsed.total, parsed.request_id
             ));
             out.extend(parsed.records.record);
+            if page >= MAX_PAGES && got > 0 && page * PAGE_SIZE < parsed.total {
+                log::warn(format!(
+                    "{domain} 记录数超过 {MAX_PAGES} 页（TotalCount={}），已截断；请拆分域名或清理记录",
+                    parsed.total
+                ));
+            }
             if got == 0 || page * PAGE_SIZE >= parsed.total || page >= MAX_PAGES {
                 break;
             }
