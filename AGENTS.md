@@ -74,7 +74,7 @@ cargo clippy                 # lint（无预配置的门控）
 # 不要做 UPX 压缩：与 systemd MemoryDenyWriteExecute=yes（W^X）冲突
 ```
 
-无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（77 个单测，macOS 另有 7 个地址解析单测）。
+无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（83 个单测，macOS 另有 7 个地址解析单测）。
 
 ## 关键行为
 

@@ -88,7 +88,7 @@ fn run() -> i32 {
     } else {
         log::info("状态持久化已禁用（每次运行从零开始）");
     }
-    let events: Option<Receiver<()>> = if cfg.events {
+    let mut events: Option<Receiver<()>> = if cfg.events {
         discover::ipv6::spawn_change_watcher()
     } else {
         None
@@ -157,22 +157,21 @@ fn run() -> i32 {
 
         let wait = schedule(&desired, &state, &cfg);
         log::debug(format!("{}s 后再次检查", wait.as_secs()));
-        idle(&events, wait);
+        idle(&mut events, wait);
     }
 }
 
-#[derive(Clone, Copy)]
-enum Phase {
-    /// 读取 DNS：任何错误都意味着该域名没有完成对账，必须计入本轮失败。
-    Read,
-    /// 写入单条记录：参数类错误只影响该目标，不拖累整轮。
-    Write,
+/// 写路径的参数错误只影响单条记录；网络/限流等仍需计入整轮退避。
+fn write_error_counts(e: &ApiError) -> bool {
+    !matches!(e, ApiError::Param(_))
 }
 
-fn count_cycle_error(e: &ApiError, phase: Phase) -> bool {
-    match phase {
-        Phase::Read => true,
-        Phase::Write => !matches!(e, ApiError::Param(_)),
+/// 读路径的参数错误（InvalidDomainName 等）是域名级配置问题：
+/// 整个域名都没完成对账，且重试无意义，升级为 fatal。
+fn domain_read_error(domain: &str, e: ApiError) -> ApiError {
+    match e {
+        ApiError::Param(m) => ApiError::Config(format!("域名 {domain} 的解析配置错误: {m}")),
+        other => other,
     }
 }
 
@@ -234,9 +233,12 @@ fn plan_cycle(
             Ok(r) => r,
             Err(e) if e.fatal() => return Err(e),
             Err(e) => {
+                let e = domain_read_error(domain, e);
+                if e.fatal() {
+                    return Err(e);
+                }
                 log::warn(format!("读取 {domain} 的记录失败：{e}"));
-                // 读路径没有"单目标"概念：一个域名查不到，整个域名都没对账
-                if count_cycle_error(&e, Phase::Read) && first_err.is_none() {
+                if first_err.is_none() {
                     first_err = Some(e);
                 }
                 continue;
@@ -291,7 +293,7 @@ fn apply(
                     Err(e) if e.fatal() => return Err(e),
                     Err(e) => {
                         log::warn(format!("更新 {} 失败：{e}", step.target));
-                        if count_cycle_error(&e, Phase::Write) && first_err.is_none() {
+                        if write_error_counts(&e) && first_err.is_none() {
                             first_err = Some(e);
                         }
                     }
@@ -315,7 +317,7 @@ fn apply(
                     Err(e) if e.fatal() => return Err(e),
                     Err(e) => {
                         log::warn(format!("新建 {} 失败：{e}", step.target));
-                        if count_cycle_error(&e, Phase::Write) && first_err.is_none() {
+                        if write_error_counts(&e) && first_err.is_none() {
                             first_err = Some(e);
                         }
                     }
@@ -363,9 +365,8 @@ fn schedule(d: &Desired, s: &State, cfg: &Config) -> Duration {
 }
 
 /// 等待下一轮；同时把长等待切成 ≤20s 的片，期间持续喂 systemd watchdog。
-fn idle(events: &Option<Receiver<()>>, total: Duration) {
+fn idle(events: &mut Option<Receiver<()>>, total: Duration) {
     let deadline = Instant::now() + total;
-    let mut events = events.as_ref();
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left < Duration::from_millis(100) {
@@ -373,15 +374,15 @@ fn idle(events: &Option<Receiver<()>>, total: Duration) {
         }
         notify("WATCHDOG=1");
         let slice = left.min(Duration::from_secs(20));
-        let woke = match events {
+
+        // 事件线程异常退出后必须永久降级，否则每轮都会重复告警
+        let mut disconnected = false;
+        let woke = match events.as_ref() {
             Some(rx) => match rx.recv_timeout(slice) {
                 Ok(()) => true,
                 Err(RecvTimeoutError::Timeout) => false,
-                // 事件线程异常退出：退回纯定时轮询，绝不能立刻重试造成忙等
                 Err(RecvTimeoutError::Disconnected) => {
-                    log::warn("netlink 地址变更事件通道已断开，退回定时轮询");
-                    events = None;
-                    std::thread::sleep(slice);
+                    disconnected = true;
                     false
                 }
             },
@@ -390,6 +391,11 @@ fn idle(events: &Option<Receiver<()>>, total: Duration) {
                 false
             }
         };
+        if disconnected {
+            log::warn("netlink 地址变更事件通道已断开，后续退回定时轮询");
+            *events = None;
+            continue;
+        }
         if woke {
             log::debug("收到地址变更事件，提前唤醒");
             break;
@@ -439,14 +445,19 @@ mod tests {
     }
 
     #[test]
-    fn param_error_counts_only_for_read_phase() {
-        let e = ApiError::Param("InvalidDomainName".into());
-        assert!(count_cycle_error(&e, Phase::Read));
-        assert!(!count_cycle_error(&e, Phase::Write));
+    fn write_error_classification() {
+        assert!(!write_error_counts(&ApiError::Param("Duplicate".into())));
+        assert!(write_error_counts(&ApiError::Transport("timeout".into())));
+    }
 
-        let e = ApiError::Transport("timeout".into());
-        assert!(count_cycle_error(&e, Phase::Read));
-        assert!(count_cycle_error(&e, Phase::Write));
+    #[test]
+    fn domain_read_param_error_becomes_fatal_config_error() {
+        let e = domain_read_error("a..com", ApiError::Param("InvalidDomainName".into()));
+        assert!(e.fatal());
+        assert!(e.to_string().contains("a..com"));
+
+        let e = domain_read_error("a.com", ApiError::Transport("timeout".into()));
+        assert!(!e.fatal());
     }
 
     #[test]

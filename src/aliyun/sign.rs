@@ -64,7 +64,7 @@ pub fn sign(
     access_key_secret: &str,
     timestamp: &str,
     nonce: &str,
-) -> Result<Signed, String> {
+) -> Signed {
     let canonical_query = canonical_query(params);
 
     let mut headers: BTreeMap<String, String> = BTreeMap::new();
@@ -89,8 +89,9 @@ pub fn sign(
     let hashed_canonical = hex_lower(&Sha256::digest(canonical_request.as_bytes()));
     let string_to_sign = format!("ACS3-HMAC-SHA256\n{hashed_canonical}");
 
+    // hmac 0.12 对任意长度密钥都返回 Ok（超长会先做一次 hash），无需处理 Err
     let mut mac = Hmac::<Sha256>::new_from_slice(access_key_secret.as_bytes())
-        .map_err(|_| "AccessKeySecret 长度非法（HMAC-SHA256 密钥上限 64 字节）".to_string())?;
+        .expect("HMAC-SHA256 接受任意长度密钥");
     mac.update(string_to_sign.as_bytes());
     let signature = hex_lower(&mac.finalize().into_bytes());
 
@@ -101,10 +102,10 @@ pub fn sign(
         ),
     );
 
-    Ok(Signed {
+    Signed {
         url: format!("https://{HOST}/?{canonical_query}"),
         headers: headers.into_iter().collect(),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -141,8 +142,7 @@ mod tests {
             "SECRET",
             "2026-01-01T00:00:00Z",
             "n1",
-        )
-        .unwrap();
+        );
         let b = sign(
             "DescribeDomainRecords",
             &p,
@@ -150,8 +150,7 @@ mod tests {
             "SECRET",
             "2026-01-01T00:00:00Z",
             "n1",
-        )
-        .unwrap();
+        );
         assert_eq!(a.url, b.url);
         assert_eq!(a.headers, b.headers);
 
@@ -176,8 +175,7 @@ mod tests {
             "SECRET",
             "2026-01-01T00:00:00Z",
             "n",
-        )
-        .unwrap();
+        );
         let auth = s
             .headers
             .iter()

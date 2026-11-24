@@ -51,10 +51,6 @@ impl Probe {
         self.sticky = None;
         None
     }
-
-    pub fn endpoint(&self) -> Option<&'static str> {
-        self.sticky.map(|i| ENDPOINTS[i])
-    }
 }
 
 fn fetch(http: &Http, url: &str) -> Option<Ipv4Addr> {
