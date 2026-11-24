@@ -104,6 +104,16 @@ sudo systemctl enable alidns-ddns
 sudo journalctl -u alidns-ddns -f
 ```
 
+`install.sh` 会同时安装 `alidns-ddns.service`、`alidns-ddns-once.service` 与
+`alidns-ddns.timer`，但**默认只启用常驻服务**，不会启用 timer（避免双实例）。
+切换到定时模式（二者互斥）：
+
+```bash
+sudo systemctl disable --now alidns-ddns
+sudo systemctl enable --now alidns-ddns.timer
+# 切回常驻：sudo systemctl disable --now alidns-ddns.timer && sudo systemctl enable --now alidns-ddns
+```
+
 #### 用 systemd LoadCredential 传递凭证（推荐，systemd ≥ 247）
 
 `config.json` 因为 `DynamicUser` 需要可读而保持 644，不应写入真实 Secret。
@@ -235,7 +245,8 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
 | `-v, --verbose` | `DDNS_VERBOSE` | — | 输出候选地址与判定细节 | false |
 | `-c, --config` | — | — | 配置文件路径 | `config.json` |
 
-配置解析失败会**快速失败并退出 78**（不再静默用默认值），systemd 配置
+配置解析失败会**快速失败并退出 78**（不再静默用默认值）；`config.json` 出现未知键
+（例如 `Intervall`）也会报错，避免拼写错误被无声忽略。systemd 配置
 `RestartPreventExitStatus=78`，避免配置错误导致无限重启刷屏。
 
 ### 配置示例

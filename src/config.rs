@@ -98,7 +98,6 @@ pub struct Config {
     pub interval: u64,
     pub verify_interval: u64,
     pub ttl: u64,
-    pub line: String,
     pub ipv6_prefer: V6Prefer,
     pub allow_ula: bool,
     pub once: bool,
@@ -263,7 +262,9 @@ fn number<I: Iterator<Item = String>>(
         .map_err(|_| format!("选项 --{k} 需要非负整数: {raw}"))
 }
 
+// 未知键直接报错，兑现"配置错误快速失败"的承诺（拼错 Ipv6Prefer 等不再静默用默认值）
 #[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct FileConfig {
     #[serde(default, rename = "AccessKeyID")]
     access_key_id: String,
@@ -417,7 +418,7 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
     let (want_v4, want_v6) = match ipv.as_str() {
         "" | "6" => (false, true),
         "4" => (true, false),
-        "46" | "64" => (true, true),
+        "46" => (true, true),
         other => {
             return Err(format!(
                 "--ipv 只接受 4 / 6 / 46（也可用 DDNS_IPV 环境变量），收到: {other}"
@@ -505,7 +506,6 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
         interval,
         verify_interval,
         ttl,
-        line,
         ipv6_prefer,
         allow_ula: args.allow_ula || file.allow_ula || env_truthy("DDNS_ALLOW_ULA"),
         once: args.once,
@@ -724,6 +724,35 @@ mod tests {
         };
         let cfg = from_args(&args).unwrap();
         assert_eq!(cfg.access_key_secret, "secret");
+    }
+
+    #[test]
+    fn ipv_64_alias_is_rejected() {
+        let args = Args {
+            access_key_id: Some("id".into()),
+            access_key_secret: Some("sk".into()),
+            domain: Some("a.com".into()),
+            ipv: Some("64".into()),
+            config: Some("/nonexistent-alidns-config.json".into()),
+            no_state: true,
+            ..Args::default()
+        };
+        assert!(from_args(&args).is_err());
+    }
+
+    #[test]
+    fn unknown_config_key_fails_fast() {
+        let dir =
+            std::env::temp_dir().join(format!("alidns-unknown-key-{}.json", std::process::id()));
+        fs::write(&dir, r#"{"DomainName":"a.com","Intervall":60}"#).unwrap();
+        let args = Args {
+            access_key_id: Some("id".into()),
+            access_key_secret: Some("sk".into()),
+            config: Some(dir.to_str().unwrap().into()),
+            ..Args::default()
+        };
+        assert!(from_args(&args).is_err());
+        let _ = fs::remove_file(dir);
     }
 
     #[test]

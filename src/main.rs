@@ -18,7 +18,7 @@ mod util;
 
 use aliyun::{ApiError, Client};
 use config::{Config, Target, EX_CONFIG};
-use plan::{Desired, StepKind};
+use plan::{Desired, Step, StepKind};
 use state::State;
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -69,7 +69,13 @@ fn run() -> i32 {
         cfg.interval,
         cfg.verify_interval,
         cfg.ttl,
-        cfg.line
+        cfg.targets
+            .iter()
+            .map(|t| t.line.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(",")
     ));
 
     let http = discover::Http::new(Duration::from_secs(8));
@@ -98,7 +104,7 @@ fn run() -> i32 {
     loop {
         notify("WATCHDOG=1");
         let desired = discover::observe(&cfg, &http, &mut probe, &mut state);
-        // 端点粘性独立于 State：只在变化时写回，避免每轮都把状态标记为脏
+        // Probe 持运行时值；State 只是持久化镜像（set_ipv4_endpoint 内部负责去重）
         state.set_ipv4_endpoint(probe.sticky_endpoint());
 
         let changed: Vec<Target>;
@@ -128,17 +134,13 @@ fn run() -> i32 {
             Err(e) => {
                 log::error(format!("不可重试错误，退出：{e}"));
                 notify("STATUS=配置或鉴权错误，需要人工介入");
-                if !cfg.dry_run {
-                    state.save_if_dirty();
-                }
+                persist(&cfg, &mut state);
                 return EX_CONFIG;
             }
         }
 
         // dry-run 不落盘：连状态文件都不应被修改
-        if !cfg.dry_run {
-            state.save_if_dirty();
-        }
+        persist(&cfg, &mut state);
 
         if let Some(command) = &cfg.on_change {
             let h = hook::Hook {
@@ -166,6 +168,21 @@ fn run() -> i32 {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Phase {
+    /// 读取 DNS：任何错误都意味着该域名没有完成对账，必须计入本轮失败。
+    Read,
+    /// 写入单条记录：参数类错误只影响该目标，不拖累整轮。
+    Write,
+}
+
+fn count_cycle_error(e: &ApiError, phase: Phase) -> bool {
+    match phase {
+        Phase::Read => true,
+        Phase::Write => !matches!(e, ApiError::Param(_)),
+    }
+}
+
 #[derive(Default)]
 struct Summary {
     updated: usize,
@@ -176,6 +193,13 @@ struct Summary {
     changed: Vec<Target>,
 }
 
+/// 唯一的落盘入口；dry-run 连状态文件都不碰。
+fn persist(cfg: &Config, state: &mut State) {
+    if !cfg.dry_run {
+        state.save_if_dirty();
+    }
+}
+
 fn group_targets(targets: &[Target]) -> BTreeMap<String, Vec<Target>> {
     let mut map: BTreeMap<String, Vec<Target>> = BTreeMap::new();
     for t in targets {
@@ -184,15 +208,16 @@ fn group_targets(targets: &[Target]) -> BTreeMap<String, Vec<Target>> {
     map
 }
 
-/// 对账一轮：每个域名只查一次 DNS，只为"需要校验"的目标生成动作。
-fn sync(
+/// 读取 + diff：每个域名只查一次 DNS，只为"需要校验"的目标生成动作。
+/// 返回动作列表和读取阶段的非致命错误（不丢掉已经生成的动作）。
+fn plan_cycle(
     client: &Client,
     cfg: &Config,
     desired: &Desired,
     by_domain: &BTreeMap<String, Vec<Target>>,
-    state: &mut State,
-) -> Result<(Summary, Option<ApiError>), ApiError> {
-    let mut sum = Summary::default();
+    state: &State,
+) -> Result<(Vec<Step>, Option<ApiError>), ApiError> {
+    let mut steps = Vec::new();
     let mut first_err: Option<ApiError> = None;
     let verify = Duration::from_secs(cfg.verify_interval);
 
@@ -217,72 +242,88 @@ fn sync(
             Err(e) if e.fatal() => return Err(e),
             Err(e) => {
                 log::warn(format!("读取 {domain} 的记录失败：{e}"));
-                if !matches!(e, ApiError::Param(_)) && first_err.is_none() {
+                // 读路径没有"单目标"概念：一个域名查不到，整个域名都没对账
+                if count_cycle_error(&e, Phase::Read) && first_err.is_none() {
                     first_err = Some(e);
                 }
                 continue;
             }
         };
 
-        for step in plan::diff(&need, desired, &records, cfg.ttl) {
-            if let Some(note) = &step.note {
-                log::warn(note);
+        steps.extend(plan::diff(&need, desired, &records, cfg.ttl));
+    }
+
+    Ok((steps, first_err))
+}
+
+/// 应用阶段：执行动作、维护状态、累计摘要。
+fn apply(
+    cfg: &Config,
+    steps: Vec<Step>,
+    client: &Client,
+    state: &mut State,
+) -> Result<(Summary, Option<ApiError>), ApiError> {
+    let mut sum = Summary::default();
+    let mut first_err: Option<ApiError> = None;
+
+    for step in steps {
+        if let Some(note) = &step.note {
+            log::warn(note);
+        }
+        match step.kind {
+            StepKind::InSync { ref value } => {
+                state.note_synced(&step.target, &value.to_string());
+                sum.synced += 1;
             }
-            match step.kind {
-                StepKind::InSync { ref value } => {
-                    state.note_synced(&step.target, &value.to_string());
-                    sum.synced += 1;
+            StepKind::Skip { ref actual } => {
+                // 缓存 DNS 里的真实值（不是期望值），用户解锁后下一轮即可发现并修正
+                state.note_skipped(&step.target, actual);
+                sum.skipped += 1;
+            }
+            StepKind::Update { ref id, ref value } => {
+                if cfg.dry_run {
+                    log::info(format!("[dry-run] 更新 {} -> {value}", step.target));
+                    sum.updated += 1;
+                    sum.changed.push(step.target.clone());
+                    continue;
                 }
-                StepKind::Skip { ref actual } => {
-                    // 缓存 DNS 里的真实值（不是期望值），用户解锁后下一轮即可发现并修正
-                    state.note_skipped(&step.target, actual);
-                    sum.skipped += 1;
-                }
-                StepKind::Update { ref id, ref value } => {
-                    if cfg.dry_run {
-                        log::info(format!("[dry-run] 更新 {} -> {value}", step.target));
+                match client.update(&step.target, id, &value.to_string(), cfg.ttl) {
+                    Ok(()) => {
+                        log::info(format!("更新 {} -> {value}", step.target));
+                        state.note_synced(&step.target, &value.to_string());
+                        state.note_change();
                         sum.updated += 1;
                         sum.changed.push(step.target.clone());
-                        continue;
                     }
-                    match client.update(&step.target, id, &value.to_string(), cfg.ttl) {
-                        Ok(()) => {
-                            log::info(format!("更新 {} -> {value}", step.target));
-                            state.note_synced(&step.target, &value.to_string());
-                            state.note_change();
-                            sum.updated += 1;
-                            sum.changed.push(step.target.clone());
-                        }
-                        Err(e) if e.fatal() => return Err(e),
-                        Err(e) => {
-                            log::warn(format!("更新 {} 失败：{e}", step.target));
-                            if !matches!(e, ApiError::Param(_)) && first_err.is_none() {
-                                first_err = Some(e);
-                            }
+                    Err(e) if e.fatal() => return Err(e),
+                    Err(e) => {
+                        log::warn(format!("更新 {} 失败：{e}", step.target));
+                        if count_cycle_error(&e, Phase::Write) && first_err.is_none() {
+                            first_err = Some(e);
                         }
                     }
                 }
-                StepKind::Add { ref value } => {
-                    if cfg.dry_run {
-                        log::info(format!("[dry-run] 新建 {} -> {value}", step.target));
+            }
+            StepKind::Add { ref value } => {
+                if cfg.dry_run {
+                    log::info(format!("[dry-run] 新建 {} -> {value}", step.target));
+                    sum.added += 1;
+                    sum.changed.push(step.target.clone());
+                    continue;
+                }
+                match client.add(&step.target, &value.to_string(), cfg.ttl) {
+                    Ok(()) => {
+                        log::info(format!("新建 {} -> {value}", step.target));
+                        state.note_synced(&step.target, &value.to_string());
+                        state.note_change();
                         sum.added += 1;
                         sum.changed.push(step.target.clone());
-                        continue;
                     }
-                    match client.add(&step.target, &value.to_string(), cfg.ttl) {
-                        Ok(()) => {
-                            log::info(format!("新建 {} -> {value}", step.target));
-                            state.note_synced(&step.target, &value.to_string());
-                            state.note_change();
-                            sum.added += 1;
-                            sum.changed.push(step.target.clone());
-                        }
-                        Err(e) if e.fatal() => return Err(e),
-                        Err(e) => {
-                            log::warn(format!("新建 {} 失败：{e}", step.target));
-                            if !matches!(e, ApiError::Param(_)) && first_err.is_none() {
-                                first_err = Some(e);
-                            }
+                    Err(e) if e.fatal() => return Err(e),
+                    Err(e) => {
+                        log::warn(format!("新建 {} 失败：{e}", step.target));
+                        if count_cycle_error(&e, Phase::Write) && first_err.is_none() {
+                            first_err = Some(e);
                         }
                     }
                 }
@@ -290,8 +331,21 @@ fn sync(
         }
     }
 
-    // 即使本轮有非致命错误，也要把已经成功写入的目标带回去触发 on-change 钩子
     Ok((sum, first_err))
+}
+
+/// 编排：读+diff → apply。致命错误立即上抛；非致命错误与摘要一起返回。
+fn sync(
+    client: &Client,
+    cfg: &Config,
+    desired: &Desired,
+    by_domain: &BTreeMap<String, Vec<Target>>,
+    state: &mut State,
+) -> Result<(Summary, Option<ApiError>), ApiError> {
+    let (steps, read_err) = plan_cycle(client, cfg, desired, by_domain, state)?;
+    let (sum, write_err) = apply(cfg, steps, client, state)?;
+    let err = write_err.or(read_err);
+    Ok((sum, err))
 }
 
 /// 自适应调度：默认间隔，变更后加速确认，`preferred_lft` 快到期时提前复查，失败则退避。
@@ -372,3 +426,60 @@ fn notify(state: &str) {
 
 #[cfg(not(target_os = "linux"))]
 fn notify(_state: &str) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Args;
+
+    fn test_cfg(interval: u64) -> Config {
+        config::from_args(&Args {
+            access_key_id: Some("id".into()),
+            access_key_secret: Some("sk".into()),
+            domain: Some("a.com".into()),
+            interval: Some(interval),
+            config: Some("/nonexistent-alidns-test.json".into()),
+            no_state: true,
+            ..Args::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn param_error_counts_only_for_read_phase() {
+        let e = ApiError::Param("InvalidDomainName".into());
+        assert!(count_cycle_error(&e, Phase::Read));
+        assert!(!count_cycle_error(&e, Phase::Write));
+
+        let e = ApiError::Transport("timeout".into());
+        assert!(count_cycle_error(&e, Phase::Read));
+        assert!(count_cycle_error(&e, Phase::Write));
+    }
+
+    #[test]
+    fn schedule_base_and_recent_change() {
+        let c = test_cfg(300);
+        assert_eq!(
+            schedule(&Desired::default(), &State::default(), &c).as_secs(),
+            300
+        );
+
+        let mut s = State::default();
+        s.note_change();
+        assert_eq!(schedule(&Desired::default(), &s, &c).as_secs(), 60);
+    }
+
+    #[test]
+    fn schedule_lifetime_and_backoff() {
+        let c = test_cfg(300);
+        let mut d = Desired::default();
+        d.v6_lft = Some(40); // 半衰 20s，但下限 15s
+        assert_eq!(schedule(&d, &State::default(), &c).as_secs(), 20);
+
+        let mut s = State::default();
+        s.note_cycle_fail();
+        s.note_cycle_fail();
+        s.note_cycle_fail(); // 退避 120s
+        assert_eq!(schedule(&d, &s, &c).as_secs(), 120);
+    }
+}
