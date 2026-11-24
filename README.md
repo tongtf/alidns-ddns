@@ -241,7 +241,7 @@ rm ~/Library/LaunchAgents/com.tongtf.alidns-ddns.plist
 密钥只从环境变量 `ALIBABA_CLOUD_ACCESS_KEY_*` 或 systemd LoadCredential 提供；
 `env` 文件只放凭证和少量部署覆盖。
 
-> **升级到 2.0.2 的用户请注意**：本版本不做旧配置兼容。旧键名（`DomainName`、`RR`、`IPv`、
+> **升级到 2.0.3 的用户请注意**：本版本不做旧配置兼容。旧键名（`DomainName`、`RR`、`IPv`、
 > `Interval`、`Ipv6Prefer`、`StateFile`、`AccessKeyID` 等）与旧环境变量（`ALIDNS_DOMAIN`、
 > `ALIDNS_RR`、`ALIDNS_INTERFACE`、`ALIDNS_IPV6_PREFER`）会被直接拒绝。请按上面的新表改写
 > `config.json` 与 `env`；可用 `adapt-install.sh --dry-run` 先查看新格式。
