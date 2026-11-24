@@ -62,27 +62,34 @@
 
 ### 环境适配检测（可选，推荐先看一眼）
 
-`adapt-install.sh` 检测 OS / systemd 版本 / 是否容器 / 是否有 IPv6，自动选择最优方案并生成
-配置与启动脚本（**只生成，不安装、不启动、不写密钥**）：
+`adapt-install.sh` 检测 OS / systemd 版本 / 是否容器 / 是否有 IPv6，并自动读取**当前已安装的旧配置**
+（`/etc/alidns-ddns/config.json`、`env`、systemd 单元里的路径），迁移为最新版配置；
+AK/SK 会自动转成 systemd 凭据（优先 `systemd-creds` 加密，失败则 600 明文凭据文件），
+不写进 `config.json`。默认只生成不安装，`--apply` 才会安装并重启：
 
 ```bash
-./adapt-install.sh --dry-run                 # 只看检测结论
-./adapt-install.sh --output ./deploy         # 生成到 ./deploy
-./adapt-install.sh --output /etc/alidns-ddns --force   # 直接生成到目标目录（谨慎）
+./adapt-install.sh --dry-run                        # 只看检测结论和迁移来源
+./adapt-install.sh --output ./deploy                # 生成到 ./deploy（默认）
+./adapt-install.sh --source /old/dir --output ./deploy   # 从指定目录读取旧配置
+sudo ./adapt-install.sh --apply --yes               # 直接备份旧文件、安装并重启服务
 ```
+
+迁移规则：环境变量优先于旧 `config.json`（与运行时优先级一致）；旧键 `DomainName`/`IPv`/
+`Ipv6Prefer`/`StateFile` 等自动映射到新格式；旧密钥从 env 或旧 JSON 读取后写入凭据文件。
+若读不到 AK/SK，凭证方式自动降级为 `EnvironmentFile` 并留占位符。
 
 生成内容按环境不同：
 
 | 环境 | 启动脚本 | 凭证方式 |
 |---|---|---|
-| Linux + systemd ≥ 247 + systemd-creds ≥ 250 | `alidns-ddns.service`（`LoadCredentialEncrypted`） | 密文凭据文件 |
+| Linux + systemd ≥ 247 + systemd-creds ≥ 250 | `alidns-ddns.service`（`LoadCredentialEncrypted`） | 密文 `.cred` 文件 |
 | Linux + systemd ≥ 247 | `alidns-ddns.service`（`LoadCredential`） | 600 明文凭据文件 |
 | Linux + 旧 systemd | `alidns-ddns.service` + 显式 `DDNS_STATE_FILE` | `EnvironmentFile` |
 | Linux 无 systemd / 容器 | `run-alidns-ddns.sh`（前台，可交 runit/supervisord） | `EnvironmentFile` |
 | macOS | 已替换路径的 launchd plist（root/用户自动判断） | `EnvironmentFile` |
 
-生成后仍需编辑 `config.json` 填入 AK/SK 与域名；详细步骤见目录里的 `README.generated.txt`。
-容器环境会自动加 `--no-events`（netlink 多播常被禁）。
+`--apply` 会自动备份被覆盖的配置、重载 systemd 并重启服务；容器环境自动加 `--no-events`。
+说明见目录里的 `README.generated.txt`。
 
 ### 编译
 
