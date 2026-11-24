@@ -346,8 +346,8 @@ rewrite_service_credentials() {
         /^[[:space:]]*#?[[:space:]]*LoadCredential(Encrypted)?=/ { next }
         /^\[Install\]/ && !done {
             if (mode == "encrypted") {
-                print "LoadCredentialEncrypted=alidns-access-key-id:/etc/alidns-ddns/alidns-access-key-id.cred"
-                print "LoadCredentialEncrypted=alidns-access-key-secret:/etc/alidns-ddns/alidns-access-key-secret.cred"
+                print "LoadCredentialEncrypted=alidns-access-key-id:/etc/alidns-ddns/alidns-access-key-id"
+                print "LoadCredentialEncrypted=alidns-access-key-secret:/etc/alidns-ddns/alidns-access-key-secret"
             } else if (mode == "loadcredential") {
                 print "LoadCredential=alidns-access-key-id:/etc/alidns-ddns/access_key_id"
                 print "LoadCredential=alidns-access-key-secret:/etc/alidns-ddns/access_key_secret"
@@ -398,18 +398,18 @@ case "$CRED_MODE" in
             if [ "$CRED_MODE" = encrypted ]; then
                 if [ "$(id -u)" -ne 0 ] && [ -z "$SUDO" ]; then
                     warn "systemd-creds 加密需要 root（host key 仅 root 可读）；退回明文凭据文件（600）。请用 sudo 重跑以启用加密"
-                    rm -f "$OUTPUT_DIR"/*.cred
+                    rm -f "$OUTPUT_DIR"/alidns-access-key-id "$OUTPUT_DIR"/alidns-access-key-secret
                     CRED_MODE=loadcredential
                 elif printf '%s' "$M_SK" | $SUDO systemd-creds encrypt --with-key=host \
-                    --name=alidns-access-key-secret - "$OUTPUT_DIR/alidns-access-key-secret.cred" \
+                    --name=alidns-access-key-secret - "$OUTPUT_DIR/alidns-access-key-secret" \
                    && printf '%s' "$M_AK" | $SUDO systemd-creds encrypt --with-key=host \
-                    --name=alidns-access-key-id - "$OUTPUT_DIR/alidns-access-key-id.cred"; then
-                    $SUDO chown "$(id -u):$(id -g)" "$OUTPUT_DIR"/*.cred 2>/dev/null || true
+                    --name=alidns-access-key-id - "$OUTPUT_DIR/alidns-access-key-id"; then
+                    $SUDO chown "$(id -u):$(id -g)" "$OUTPUT_DIR"/alidns-access-key-id "$OUTPUT_DIR"/alidns-access-key-secret 2>/dev/null || true
                     rm -f "$OUTPUT_DIR/access_key_id" "$OUTPUT_DIR/access_key_secret"
-                    CRED_LINES="# AK/SK 已加密为 *.cred（见输出目录）"
+                    CRED_LINES="# AK/SK 已加密为 alidns-access-key-*（见输出目录）"
                 else
                     warn "systemd-creds 加密失败（见上方错误），退回明文凭据文件（600）"
-                    rm -f "$OUTPUT_DIR"/*.cred
+                    rm -f "$OUTPUT_DIR"/alidns-access-key-id "$OUTPUT_DIR"/alidns-access-key-secret
                     CRED_MODE=loadcredential
                 fi
             fi
@@ -492,7 +492,7 @@ write_file "$OUTPUT_DIR/README.generated.txt" <<EOF
 生成文件：
   config.json        新格式业务配置（密钥已移除）
   env                凭证（$CRED_MODE）+ 部署覆盖，600
-  $([ "$CRED_MODE" = encrypted ] && echo '*.cred  AK/SK 密文（systemd-creds）' || true)
+  $([ "$CRED_MODE" = encrypted ] && echo 'alidns-access-key-*  AK/SK 密文（systemd-creds）' || true)
   $([ "$PLAN" = systemd ] && echo 'alidns-ddns.service' || true)
   $([ "$PLAN" = launchd ] && echo 'com.tongtf.alidns-ddns.plist' || true)
   $([ "$PLAN" = standalone ] && echo 'run-alidns-ddns.sh' || true)
@@ -531,7 +531,7 @@ if [ "$APPLY" = yes ]; then
     chmod 600 "$TARGET_ENV"
 
     if [ "$CRED_MODE" = encrypted ] || [ "$CRED_MODE" = loadcredential ]; then
-        for cred in "$OUTPUT_DIR"/*.cred "$OUTPUT_DIR/access_key_id" "$OUTPUT_DIR/access_key_secret"; do
+        for cred in "$OUTPUT_DIR"/alidns-access-key-id "$OUTPUT_DIR"/alidns-access-key-secret "$OUTPUT_DIR/access_key_id" "$OUTPUT_DIR/access_key_secret"; do
             [ -f "$cred" ] || continue
             cp "$cred" "/etc/alidns-ddns/$(basename "$cred")"
             chmod 600 "/etc/alidns-ddns/$(basename "$cred")"

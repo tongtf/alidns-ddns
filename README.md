@@ -87,7 +87,7 @@ sudo ./adapt-install.sh --apply --yes               # 直接备份旧文件、�
 
 | 环境 | 启动脚本 | 凭证方式 |
 |---|---|---|
-| Linux + systemd ≥ 247 + systemd-creds ≥ 250 | `alidns-ddns.service`（`LoadCredentialEncrypted`） | 密文 `.cred` 文件 |
+| Linux + systemd ≥ 247 + systemd-creds ≥ 250 | `alidns-ddns.service`（`LoadCredentialEncrypted`） | 密文凭据文件 |
 | Linux + systemd ≥ 247 | `alidns-ddns.service`（`LoadCredential`） | 600 明文凭据文件 |
 | Linux + 旧 systemd | `alidns-ddns.service` + 显式 `DDNS_STATE_FILE` | `EnvironmentFile` |
 | Linux 无 systemd / 容器 | `run-alidns-ddns.sh`（前台，可交 runit/supervisord） | `EnvironmentFile` |
