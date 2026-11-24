@@ -4,5 +4,13 @@
     "DomainName": "example.com",
     "RR": "@",
     "IPv": "6",
-    "Interval": 3600
+    "Interval": 300,
+    "VerifyInterval": 21600,
+    "Ttl": 600,
+    "Line": "default",
+    "Ipv6Prefer": "auto",
+    "AllowUla": false,
+    "StateFile": "",
+    "OnChange": "",
+    "OnChangeTimeout": 60
 }

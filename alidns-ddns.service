@@ -1,17 +1,29 @@
 [Unit]
 Description=AliDNS DDNS Service
 Documentation=https://github.com/tongtf/alidns-ddns
-After=network-online.target
+After=network-online.target time-sync.target
 Wants=network-online.target
+# 配置/鉴权错误退出 78 时不再重启，避免无限重启刷屏（见 RestartPreventExitStatus）
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
-Type=simple
-# 以动态、临时账号运行，无持久化账户、进程结束自动回收权限
-DynamicUser=yes
+# Type=notify + WatchdogSec：进程挂死时由 systemd 重启（本程序每 20s 喂一次）
+Type=notify
+NotifyAccess=main
+WatchdogSec=300
 ExecStart=/usr/local/bin/alidns-ddns --config /etc/alidns-ddns/config.json
 EnvironmentFile=/etc/alidns-ddns/env
-Restart=always
+
+# 成功即退出（--once）时不重启；失败按退避重启
+Restart=on-failure
 RestartSec=10
+# sysexits.h: EX_CONFIG=78 → 配置或鉴权问题，重启无意义
+RestartPreventExitStatus=78
+UMask=0077
+# 持久化期望值缓存/退避/端点粘性；systemd 会导出 $STATE_DIRECTORY
+# 注意：常驻服务与 --once timer 共用同一状态文件，二者只能启用其一
+StateDirectory=alidns-ddns
 
 # --- 文件系统只读隔离 ---
 PrivateTmp=yes
@@ -25,12 +37,14 @@ ProtectHostname=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
-ProtectDevices=yes
 RestrictNamespaces=yes
 RestrictRealtime=yes
 LockPersonality=yes
 
 # --- 进程 / 能力 / 权限提升限制 ---
+# 本程序不需要任何 capability：网络与 netlink 都在普通用户权限内
+CapabilityBoundingSet=
+AmbientCapabilities=
 NoNewPrivileges=yes
 RestrictSUIDSGID=yes
 MemoryDenyWriteExecute=yes
@@ -38,8 +52,11 @@ PrivateDevices=yes
 PrivatePIDs=yes
 KeyringMode=private
 
-# --- 仅放行必要的网络地址族(HTTPS + 本地网卡 IPv6 发现) ---
+# --- 仅放行必要的网络地址族（HTTPS + netlink 地址读取 + NOTIFY_SOCKET） ---
 RestrictAddressFamilies=AF_NETLINK AF_LOCAL AF_INET AF_INET6
+
+# 可选（systemd >= 247）：用凭据代替环境文件，避免密钥出现在任何可读文件里
+#LoadCredential=alidns-env:/etc/alidns-ddns/env
 
 [Install]
 WantedBy=multi-user.target
