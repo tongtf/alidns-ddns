@@ -133,6 +133,51 @@ sudo journalctl -u alidns-ddns -n 20 -f
 > 若 systemd 版本较老不支持 `LoadCredential`，请继续使用 `chmod 600` 的 `EnvironmentFile`，
 > 并确认 `config.json` 中 `AccessKeySecret` 为空。
 
+##### 可选：加密凭据（LoadCredentialEncrypted，systemd ≥ 250）
+
+明文凭据文件虽然只有 600，但仍是磁盘上的明文。若系统支持 `systemd-creds`，
+可以把 AK/SK **加密后落盘**：systemd 在启动服务时解密鉴权，再把明文挂载到
+`$CREDENTIALS_DIRECTORY/`——**本程序无需任何改动**，仍按同样的路径读取。
+
+密钥选择（`--with-key=`）：
+
+| 取值 | 说明 |
+|---|---|
+| `host` | 用 `/var/lib/systemd/credential.secret`（root 600）加解密；无 TPM 机器适用 |
+| `tpm2` | 只用 TPM2 派生密钥；换主板/清 TPM 后无法解密 |
+| `host+tpm2`（默认 `auto`） | 同时绑定机器与系统安装，安全性最高；升级 BIOS/换盘需规划恢复 |
+| `null` | 不加密不鉴权，**仅测试用**，生产禁用 |
+
+生成密文（凭据名必须写成下面这两个 ID，systemd-creds 会把名字嵌进密文防改名挪用）：
+
+```bash
+sudo systemd-creds setup    # 生成 host key（encrypt 时也会自动生成）
+
+printf '%s' 'LTAI5xxxxxxx' | \
+  sudo systemd-creds encrypt --with-key=host --name=alidns-access-key-id - \
+  /etc/alidns-ddns/alidns-access-key-id.cred
+printf '%s' 'xxxxSecretxxxx' | \
+  sudo systemd-creds encrypt --with-key=host --name=alidns-access-key-secret - \
+  /etc/alidns-ddns/alidns-access-key-secret.cred
+sudo chmod 600 /etc/alidns-ddns/*.cred
+```
+
+用加密版 drop-in 替换明文版（**二者只能启用一个**）：
+
+```bash
+sudo cp examples/alidns-ddns-credentials-encrypted.conf \
+  /etc/systemd/system/alidns-ddns.service.d/credentials.conf
+sudo systemctl daemon-reload
+sudo systemctl restart alidns-ddns
+```
+
+验证：服务能正常进入 API 调用即说明解密成功；如果报"缺少必填项"，说明凭据路径或名字不匹配。
+
+轮换 AK/SK 时重新执行加密命令并 `systemctl restart` 即可。使用 host key 时请备份
+`/var/lib/systemd/credential.secret`（它本身是敏感文件）——丢失后旧密文无法解密，只能重新加密。
+`LoadCredentialEncrypted=` 从 systemd 247 起可用，`systemd-creds` 工具从 250 起提供。
+如果版本较老，退回上面的明文 `LoadCredential` 方案。
+
 **macOS (launchd) — 推荐系统级服务（开机即启，不依赖图形登录）:**
 
 ```bash
