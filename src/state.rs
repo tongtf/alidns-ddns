@@ -91,8 +91,20 @@ fn unix_to_instant(ts: i64) -> Instant {
 }
 
 fn instant_to_unix(t: Instant) -> i64 {
-    let ahead = t.saturating_duration_since(Instant::now()).as_secs() as i64;
-    now_unix() + ahead
+    match t.checked_duration_since(Instant::now()) {
+        // 未来时刻（时钟回拨）：按"还有多久"正向偏移
+        Some(ahead) => now_unix() + ahead.as_secs() as i64,
+        // 绝大多数情况是过去时刻：必须减去已经过去的时间。
+        // 旧实现用 saturating_duration_since 得到 0，把所有历史时刻写成 now，
+        // 导致一次落盘把很早以前的 checked_at 假装成"刚刚校验"。
+        None => {
+            let past = Instant::now()
+                .saturating_duration_since(t)
+                .as_secs()
+                .min(31_536_000);
+            now_unix() - past as i64
+        }
+    }
 }
 
 impl State {
@@ -243,6 +255,19 @@ impl State {
         self.dirty = true;
     }
 
+    /// 记录一个"无法写入"的目标：缓存 DNS 里的真实值，而不是期望值。
+    /// 这样下一轮仍会发现值不一致，用户解锁后可立即被对账修正。
+    pub fn note_skipped(&mut self, target: &Target, actual: &str) {
+        self.entries.insert(
+            target.clone(),
+            Entry {
+                value: actual.to_string(),
+                checked_at: Instant::now(),
+            },
+        );
+        self.dirty = true;
+    }
+
     pub fn note_change(&mut self) {
         self.last_change = Some(Instant::now());
         self.dirty = true;
@@ -349,6 +374,16 @@ mod tests {
     }
 
     #[test]
+    fn skipped_target_uses_actual_value() {
+        let t = target();
+        let mut s = State::default();
+        s.note_skipped(&t, "2408::old");
+        // 期望值不同 → 下一轮仍应查询，解锁后能立刻修正
+        assert!(s.needs_lookup(&t, "2408::new", Duration::from_secs(3600)));
+        assert!(!s.needs_lookup(&t, "2408::old", Duration::from_secs(3600)));
+    }
+
+    #[test]
     fn backoff_grows_and_caps() {
         let mut s = State::default();
         assert_eq!(s.backoff(), None);
@@ -387,6 +422,29 @@ mod tests {
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("tmp"));
+    }
+
+    #[test]
+    fn save_does_not_rewrite_old_check_time_as_now() {
+        let path = temp_path();
+        let t = target();
+        let mut s = State::load(Some(path.clone()));
+        s.note_synced(&t, "::1");
+        // 模拟目标在 2 小时前校验过，此刻因其他原因落盘
+        s.entries.get_mut(&t).unwrap().checked_at = Instant::now() - Duration::from_secs(7200);
+        s.last_change = Some(Instant::now() - Duration::from_secs(3600));
+        s.save_if_dirty();
+
+        let loaded = State::load(Some(path.clone()));
+        let elapsed = loaded.entries[&t].checked_at.elapsed().as_secs();
+        assert!(
+            (7000..=7400).contains(&elapsed),
+            "checked_at 不应被改写成 now，实际已过去 {elapsed}s"
+        );
+        let changed_ago = loaded.last_change.unwrap().elapsed().as_secs();
+        assert!((3400..=3800).contains(&changed_ago), "{changed_ago}");
+
+        let _ = fs::remove_file(path);
     }
 
     #[test]

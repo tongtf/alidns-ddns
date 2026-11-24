@@ -4,9 +4,10 @@ version = 4
 
 [[package]]
 name = "alidns-ddns"
-version = "2.0.1"
+version = "2.0.2"
 dependencies = [
  "hmac",
+ "libc",
  "local-ip-address",
  "neli",
  "serde",

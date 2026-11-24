@@ -463,7 +463,8 @@ pub fn from_args(args: &Args) -> Result<Config, String> {
 
     Ok(Config {
         access_key_id: access_key_id.trim().to_string(),
-        access_key_secret,
+        // 环境变量 / 配置文件里常见的尾随空白会导致 InvalidSignature
+        access_key_secret: access_key_secret.trim().to_string(),
         targets,
         want_v4,
         want_v6,
@@ -657,6 +658,19 @@ mod tests {
     fn flag_parsing_rejects_bad_number() {
         let r = parse_args_from(["--interval", "abc"].into_iter().map(String::from));
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn secret_is_trimmed() {
+        let args = Args {
+            access_key_id: Some("id".into()),
+            access_key_secret: Some("  secret \n".into()),
+            domain: Some("a.com".into()),
+            config: Some("/nonexistent-alidns-config.json".into()),
+            ..Args::default()
+        };
+        let cfg = from_args(&args).unwrap();
+        assert_eq!(cfg.access_key_secret, "secret");
     }
 
     #[test]

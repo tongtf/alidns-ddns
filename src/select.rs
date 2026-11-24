@@ -77,8 +77,10 @@ enum Bucket {
     UlaStable,
     /// ULA + Temporary + Preferred
     UlaTemporary,
-    /// 任意 + Deprecated（仍 valid）
-    Deprecated,
+    /// 全局 + Deprecated（仍 valid），可作为最后兜底
+    DeprecatedGlobal,
+    /// ULA + Deprecated；默认同样受 allow_ula 约束
+    DeprecatedUla,
 }
 
 fn scope_of(addr: &Ipv6Addr) -> Scope {
@@ -123,7 +125,12 @@ fn bucket_of(c: &V6Cand) -> Option<Bucket> {
         return None;
     }
     if c.state == V6State::Deprecated {
-        return Some(Bucket::Deprecated);
+        // 保留 scope：deprecated 的 ULA 也不能绕过 --allow-ula
+        return Some(match scope {
+            Scope::Global => Bucket::DeprecatedGlobal,
+            Scope::Ula => Bucket::DeprecatedUla,
+            Scope::Skip => return None,
+        });
     }
     Some(match (scope, c.kind) {
         (Scope::Global, V6Kind::Stable) => Bucket::GlobalStable,
@@ -134,28 +141,31 @@ fn bucket_of(c: &V6Cand) -> Option<Bucket> {
     })
 }
 
-fn bucket_order(prefer: V6Prefer) -> [Bucket; 5] {
+fn bucket_order(prefer: V6Prefer) -> [Bucket; 6] {
     match prefer {
         V6Prefer::Auto => [
             Bucket::GlobalStable,
             Bucket::GlobalTemporary,
             Bucket::UlaStable,
             Bucket::UlaTemporary,
-            Bucket::Deprecated,
+            Bucket::DeprecatedGlobal,
+            Bucket::DeprecatedUla,
         ],
         V6Prefer::Stable => [
             Bucket::GlobalStable,
             Bucket::UlaStable,
             Bucket::GlobalTemporary,
             Bucket::UlaTemporary,
-            Bucket::Deprecated,
+            Bucket::DeprecatedGlobal,
+            Bucket::DeprecatedUla,
         ],
         V6Prefer::Temporary => [
             Bucket::GlobalTemporary,
             Bucket::UlaTemporary,
             Bucket::GlobalStable,
             Bucket::UlaStable,
-            Bucket::Deprecated,
+            Bucket::DeprecatedGlobal,
+            Bucket::DeprecatedUla,
         ],
     }
 }
@@ -194,14 +204,29 @@ pub fn select(cands: &[V6Cand], cfg: &Cfg, kernel_pick: Option<Ipv6Addr>) -> Opt
         return None;
     }
 
+    let mut ula_refused = false;
     for bucket in bucket_order(cfg.prefer) {
         let best = cands
             .iter()
             .filter(|c| bucket_of(c) == Some(bucket))
             .max_by(|a, b| better(a, b, kernel_pick));
         let Some(c) = best else { continue };
+
+        // ULA 默认拒绝，但只跳过该桶，而不是直接放弃整个选择：
+        // 否则"ULA stable + deprecated 的全球地址"会错过可用的兜底地址。
+        let is_ula = matches!(
+            bucket,
+            Bucket::UlaStable | Bucket::UlaTemporary | Bucket::DeprecatedUla
+        );
+        if is_ula && !cfg.allow_ula {
+            ula_refused = true;
+            continue;
+        }
+
         let warn = match bucket {
-            Bucket::Deprecated => Some("所有可用地址都已 deprecated，沿用旧地址；新地址尚未就绪"),
+            Bucket::DeprecatedGlobal => {
+                Some("所有可用地址都已 deprecated，沿用旧地址；新地址尚未就绪")
+            }
             Bucket::GlobalTemporary => {
                 if cfg.prefer == V6Prefer::Temporary {
                     None
@@ -209,13 +234,7 @@ pub fn select(cands: &[V6Cand], cfg: &Cfg, kernel_pick: Option<Ipv6Addr>) -> Opt
                     Some("仅存在临时地址（RFC 4941），会周期性轮换；建议关闭隐私扩展或改用稳定地址")
                 }
             }
-            Bucket::UlaStable | Bucket::UlaTemporary => {
-                if !cfg.allow_ula {
-                    return Some(Pick::Refuse {
-                        reason:
-                            "仅存在 ULA 地址（fc00::/7），公网不可达；如确需写入请加 --allow-ula",
-                    });
-                }
+            Bucket::UlaStable | Bucket::UlaTemporary | Bucket::DeprecatedUla => {
                 Some("使用 ULA 地址，公网不可达")
             }
             Bucket::GlobalStable => None,
@@ -224,6 +243,12 @@ pub fn select(cands: &[V6Cand], cfg: &Cfg, kernel_pick: Option<Ipv6Addr>) -> Opt
             addr: c.addr,
             preferred_lft: c.preferred_lft,
             warn,
+        });
+    }
+
+    if ula_refused {
+        return Some(Pick::Refuse {
+            reason: "仅存在 ULA 地址（fc00::/7），公网不可达；如确需写入请加 --allow-ula",
         });
     }
     None
@@ -354,6 +379,52 @@ mod tests {
             select(&set, &cfg(), None).unwrap(),
             Pick::Refuse { .. }
         ));
+    }
+
+    #[test]
+    fn deprecated_ula_is_refused_by_default() {
+        let set = [cand(
+            "fd00::1",
+            V6Kind::Stable,
+            V6State::Deprecated,
+            1,
+            1000,
+        )];
+        assert!(matches!(
+            select(&set, &cfg(), None).unwrap(),
+            Pick::Refuse { .. }
+        ));
+    }
+
+    #[test]
+    fn deprecated_global_beats_refused_ula() {
+        let set = [
+            cand("fd00::1", V6Kind::Stable, V6State::Preferred, 1, 1000),
+            cand("2408::1", V6Kind::Stable, V6State::Deprecated, 1, 1000),
+        ];
+        match select(&set, &cfg(), None).unwrap() {
+            Pick::Use { addr, warn, .. } => {
+                assert_eq!(addr, "2408::1".parse::<Ipv6Addr>().unwrap());
+                assert!(warn.is_some());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn deprecated_ula_allowed_when_asked() {
+        let set = [cand(
+            "fd00::1",
+            V6Kind::Stable,
+            V6State::Deprecated,
+            1,
+            1000,
+        )];
+        let c = Cfg {
+            prefer: V6Prefer::Auto,
+            allow_ula: true,
+        };
+        assert!(matches!(select(&set, &c, None).unwrap(), Pick::Use { .. }));
     }
 
     #[test]

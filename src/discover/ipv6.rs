@@ -243,27 +243,28 @@ pub fn spawn_change_watcher() -> Option<std::sync::mpsc::Receiver<()>> {
     /// RTMGRP_IPV6_IFADDR（`/usr/include/linux/rtnetlink.h`）
     const RTMGRP_IPV6_IFADDR: u32 = 0x100;
 
+    // 必须先连接成功再启动线程：否则线程立刻退出、tx 被 drop，
+    // 主循环会对已断开的 channel 忙等。连接失败时直接退回定时轮询。
+    let Ok(sock) = NlSocketHandle::connect(
+        NlFamily::Route,
+        None,
+        Groups::new_bitmask(RTMGRP_IPV6_IFADDR),
+    ) else {
+        return None;
+    };
+
     let (tx, rx) = channel();
     let spawned = std::thread::Builder::new()
         .name("rtnl-event".into())
-        .spawn(move || {
-            let Ok(sock) = NlSocketHandle::connect(
-                NlFamily::Route,
-                None,
-                Groups::new_bitmask(RTMGRP_IPV6_IFADDR),
-            ) else {
-                return;
-            };
-            loop {
-                match sock.recv_all::<Rtm, Ifaddrmsg>() {
-                    Ok((buf, _)) if !buf.is_empty() => {
-                        if tx.send(()).is_err() {
-                            return;
-                        }
+        .spawn(move || loop {
+            match sock.recv_all::<Rtm, Ifaddrmsg>() {
+                Ok((buf, _)) if !buf.is_empty() => {
+                    if tx.send(()).is_err() {
+                        return;
                     }
-                    Ok(_) => {}
-                    Err(_) => std::thread::sleep(Duration::from_secs(5)),
                 }
+                Ok(_) => {}
+                Err(_) => std::thread::sleep(Duration::from_secs(5)),
             }
         })
         .is_ok();

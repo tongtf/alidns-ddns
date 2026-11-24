@@ -21,7 +21,7 @@ use config::{Config, Target, EX_CONFIG};
 use plan::{Desired, StepKind};
 use state::State;
 use std::collections::BTreeMap;
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 fn main() {
@@ -101,10 +101,19 @@ fn run() -> i32 {
         // 端点粘性独立于 State：只在变化时写回，避免每轮都把状态标记为脏
         state.set_ipv4_endpoint(probe.sticky_endpoint());
 
-        let mut changed: Vec<Target> = Vec::new();
-        let cycle_failed = match sync(&client, &cfg, &desired, &by_domain, &mut state) {
-            Ok(sum) => {
-                state.note_cycle_ok();
+        let changed: Vec<Target>;
+        let cycle_failed: bool;
+        match sync(&client, &cfg, &desired, &by_domain, &mut state) {
+            Ok((sum, err)) => {
+                changed = sum.changed;
+                cycle_failed = err.is_some();
+                match err {
+                    None => state.note_cycle_ok(),
+                    Some(e) => {
+                        state.note_cycle_fail();
+                        log::warn(format!("本轮部分目标失败（{e}），退避后重试"));
+                    }
+                }
                 let line = format!(
                     "本轮完成：更新 {}，新建 {}，一致 {}，跳过 {}",
                     sum.updated, sum.added, sum.synced, sum.skipped
@@ -114,10 +123,9 @@ fn run() -> i32 {
                 } else {
                     log::debug(line);
                 }
-                changed = sum.changed;
-                false
             }
-            Err(e) if e.fatal() => {
+            // sync 只在鉴权/时钟这类致命错误时返回 Err
+            Err(e) => {
                 log::error(format!("不可重试错误，退出：{e}"));
                 notify("STATUS=配置或鉴权错误，需要人工介入");
                 if !cfg.dry_run {
@@ -125,12 +133,7 @@ fn run() -> i32 {
                 }
                 return EX_CONFIG;
             }
-            Err(e) => {
-                state.note_cycle_fail();
-                log::warn(format!("本轮同步失败（{e}），退避后重试"));
-                true
-            }
-        };
+        }
 
         // dry-run 不落盘：连状态文件都不应被修改
         if !cfg.dry_run {
@@ -188,7 +191,7 @@ fn sync(
     desired: &Desired,
     by_domain: &BTreeMap<String, Vec<Target>>,
     state: &mut State,
-) -> Result<Summary, ApiError> {
+) -> Result<(Summary, Option<ApiError>), ApiError> {
     let mut sum = Summary::default();
     let mut first_err: Option<ApiError> = None;
     let verify = Duration::from_secs(cfg.verify_interval);
@@ -230,9 +233,9 @@ fn sync(
                     state.note_synced(&step.target, &value.to_string());
                     sum.synced += 1;
                 }
-                StepKind::Skip { ref value } => {
-                    // 记为已校验，避免每个周期都去查同一条不可写的记录。
-                    state.note_synced(&step.target, &value.to_string());
+                StepKind::Skip { ref actual } => {
+                    // 缓存 DNS 里的真实值（不是期望值），用户解锁后下一轮即可发现并修正
+                    state.note_skipped(&step.target, actual);
                     sum.skipped += 1;
                 }
                 StepKind::Update { ref id, ref value } => {
@@ -287,10 +290,8 @@ fn sync(
         }
     }
 
-    match first_err {
-        Some(e) => Err(e),
-        None => Ok(sum),
-    }
+    // 即使本轮有非致命错误，也要把已经成功写入的目标带回去触发 on-change 钩子
+    Ok((sum, first_err))
 }
 
 /// 自适应调度：默认间隔，变更后加速确认，`preferred_lft` 快到期时提前复查，失败则退避。
@@ -317,6 +318,7 @@ fn schedule(d: &Desired, s: &State, cfg: &Config) -> Duration {
 /// 等待下一轮；同时把长等待切成 ≤20s 的片，期间持续喂 systemd watchdog。
 fn idle(events: &Option<Receiver<()>>, total: Duration) {
     let deadline = Instant::now() + total;
+    let mut events = events.as_ref();
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left < Duration::from_millis(100) {
@@ -325,7 +327,17 @@ fn idle(events: &Option<Receiver<()>>, total: Duration) {
         notify("WATCHDOG=1");
         let slice = left.min(Duration::from_secs(20));
         let woke = match events {
-            Some(rx) => matches!(rx.recv_timeout(slice), Ok(())),
+            Some(rx) => match rx.recv_timeout(slice) {
+                Ok(()) => true,
+                Err(RecvTimeoutError::Timeout) => false,
+                // 事件线程异常退出：退回纯定时轮询，绝不能立刻重试造成忙等
+                Err(RecvTimeoutError::Disconnected) => {
+                    log::warn("netlink 地址变更事件通道已断开，退回定时轮询");
+                    events = None;
+                    std::thread::sleep(slice);
+                    false
+                }
+            },
             None => {
                 std::thread::sleep(slice);
                 false

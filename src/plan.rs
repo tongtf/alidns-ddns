@@ -33,8 +33,8 @@ pub enum StepKind {
     Add { value: IpAddr },
     /// 已一致。
     InSync { value: IpAddr },
-    /// 不做写入（记录被锁定等）。
-    Skip { value: IpAddr },
+    /// 不做写入（记录被锁定等）。带上 DNS 里的真实值，避免缓存说谎。
+    Skip { actual: String },
 }
 
 #[derive(Clone, Debug)]
@@ -104,10 +104,17 @@ pub fn diff(targets: &[&Target], desired: &Desired, records: &[Record], ttl: u64
             });
         }
         if first.locked {
+            let msg = format!("{} 的记录被锁定（Locked=true），跳过", t);
+            let note = Some(match note.take() {
+                Some(n) => format!("{n}; {msg}"),
+                None => msg,
+            });
             out.push(Step {
                 target: (*t).clone(),
-                kind: StepKind::Skip { value },
-                note: Some(format!("{} 的记录被锁定（Locked=true），跳过", t)),
+                kind: StepKind::Skip {
+                    actual: first.value.clone(),
+                },
+                note,
             });
             continue;
         }
@@ -240,7 +247,10 @@ mod tests {
         let mut r = record("@", "default", "A", "1.1.1.1");
         r.locked = true;
         let steps = diff(&[&t], &desired(Some("9.9.9.9"), None), &[r], 600);
-        assert!(matches!(steps[0].kind, StepKind::Skip { .. }));
+        match &steps[0].kind {
+            StepKind::Skip { actual } => assert_eq!(actual, "1.1.1.1"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

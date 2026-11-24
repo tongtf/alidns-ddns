@@ -507,7 +507,9 @@ macOS 的 `getifaddrs()` 与 Linux 一样只有接口标志（`IFF_*`），拿�
 `--on-change <CMD>` / `DDNS_ON_CHANGE` / config `OnChange`：只在 A/AAAA 真正写入后同步执行，
 `--dry-run` 不执行。通过环境变量传递 `DDNS_CHANGED=1`、`DDNS_CHANGED_COUNT`、
 `DDNS_CHANGED_TARGETS`（逗号分隔）、`DDNS_IPV4` / `DDNS_IPV6`，避免把 IP 拼进命令造成注入。
-超时默认 60s（`--on-change-timeout`），超时 kill；钩子失败只告警，不回滚 DNS、不改变退出码。
+超时默认 60s（`--on-change-timeout`），钩子置于独立进程组，超时整组 kill；
+stdout/stderr 不捕获（直接继承到 journald），避免管道缓冲写满或后台子进程持有写端导致超时失效。
+钩子失败只告警，不回滚 DNS、不改变退出码。
 
 钩子继承服务进程的环境变量（包括阿里云 AK/SK，便于复用到 acme.sh），因此只应配置可信命令。
 注意：Linux systemd 单元以 DynamicUser + 空 capability + `ProtectSystem=strict` 运行，

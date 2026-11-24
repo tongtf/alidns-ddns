@@ -10,6 +10,8 @@ StartLimitBurst=5
 [Service]
 # Type=notify + WatchdogSec：进程挂死时由 systemd 重启（本程序每 20s 喂一次）
 Type=notify
+# 与 once 单元保持一致：动态临时用户 + StateDirectory，钩子无权 reload root 服务
+DynamicUser=yes
 NotifyAccess=main
 WatchdogSec=300
 ExecStart=/usr/local/bin/alidns-ddns --config /etc/alidns-ddns/config.json

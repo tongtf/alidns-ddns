@@ -8,7 +8,7 @@
 use crate::config::Target;
 use crate::log;
 use crate::plan::Desired;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -62,53 +62,59 @@ pub fn run(h: &Hook<'_>) -> Result<(), String> {
             "DDNS_IPV6",
             h.desired.v6.map(|v| v.to_string()).unwrap_or_default(),
         )
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        // 不捕获 stdout/stderr：捕获会因管道缓冲写满或后台进程持有写端而挂死，
+        // 让超时形同虚设。直接继承到 journald，由钩子脚本自己写日志。
+        ;
+
+    // 独立进程组：超时后可按组 kill，避免钩子派生的后台进程残留
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
 
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("无法启动 on-change 钩子: {e}"))?;
 
     let deadline = Instant::now() + h.timeout;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
+            Ok(Some(status)) => break status,
             Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_group(&mut child);
                 return Err(format!("on-change 钩子超时（{}s）", h.timeout.as_secs()));
             }
             Ok(None) => thread::sleep(Duration::from_millis(100)),
             Err(e) => return Err(format!("查询 on-change 钩子状态失败: {e}")),
         }
-    }
+    };
 
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("读取 on-change 钩子输出失败: {e}"))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stdout.trim().is_empty() {
-        log::debug(format!("on-change 钩子 stdout: {}", stdout.trim()));
-    }
-    if !stderr.trim().is_empty() {
-        log::debug(format!("on-change 钩子 stderr: {}", stderr.trim()));
-    }
-
-    if output.status.success() {
+    if status.success() {
         log::info(format!(
             "on-change 钩子执行成功（{} 个变更）",
             h.changed.len()
         ));
         Ok(())
     } else {
-        Err(format!(
-            "on-change 钩子退出码 {:?}: {}",
-            output.status.code(),
-            stderr.trim()
-        ))
+        Err(format!("on-change 钩子退出码 {:?}", status.code()))
     }
+}
+
+/// 超时后杀掉整个进程组，避免钩子派生的后台进程残留。
+#[cfg(unix)]
+fn kill_group(child: &mut Child) {
+    unsafe {
+        // process_group(0) 让子进程成为独立进程组，pgid == 其 pid
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    let _ = child.wait();
+}
+
+#[cfg(not(unix))]
+fn kill_group(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 // 等待子进程并读取输出的实现需要在 Unix 上验证（CI/本机为 Linux）。
