@@ -1,23 +1,28 @@
 #!/bin/sh
-# 环境适配安装检测：按当前系统生成最优配置与启动脚本（不安装、不启动、不写密钥）。
+# 环境适配安装检测/迁移：检测当前系统、读取已安装配置，生成最新版配置文件与启动脚本，
+# 并尽可能自动把 AK/SK 转成 systemd 凭据（明文 600 或 systemd-creds 加密）。
+#
+# 默认只生成不安装；--apply 才复制文件并重启服务。
 #
 # 用法：
-#   ./adapt-install.sh [--output DIR] [--force] [--dry-run]
+#   ./adapt-install.sh [--output DIR] [--source DIR] [--force] [--dry-run]
+#                      [--apply] [--yes] [--no-encrypt]
 #
-# 默认输出到 ./deploy。生成内容：
-#   config.json              不含真实 AK/SK，需自行填写
-#   env                      非敏感设置（600）
-#   alidns-ddns.service      Linux/systemd：基于仓库模板生成
-#   run-alidns-ddns.sh       Linux/无 systemd：前台运行脚本
-#   com.tongtf.alidns-ddns.plist  macOS：launchd 模板已替换路径
-#   README.generated.txt     按检测结果给出的填写/安装步骤
+# --source DIR   从 DIR 读取旧的 config.json / env（默认自动探测）
+# --apply        把生成结果安装到系统目录并重启服务（需相应权限）
+# --yes          --apply 时跳过确认
+# --no-encrypt   即使支持 systemd-creds 也只写明文凭据（600）
 
 set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 OUTPUT_DIR="$SCRIPT_DIR/deploy"
+SOURCE_DIR=""
 FORCE=no
 DRY_RUN=no
+APPLY=no
+ASSUME_YES=no
+ENCRYPT_AUTO=yes
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -26,16 +31,18 @@ while [ "$#" -gt 0 ]; do
             OUTPUT_DIR=$2
             shift 2
             ;;
-        --force)
-            FORCE=yes
-            shift
+        --source)
+            [ "$#" -ge 2 ] || { echo "错误: --source 缺少目录" >&2; exit 2; }
+            SOURCE_DIR=$2
+            shift 2
             ;;
-        --dry-run)
-            DRY_RUN=yes
-            shift
-            ;;
+        --force) FORCE=yes; shift ;;
+        --dry-run) DRY_RUN=yes; shift ;;
+        --apply) APPLY=yes; shift ;;
+        --yes) ASSUME_YES=yes; shift ;;
+        --no-encrypt) ENCRYPT_AUTO=no; shift ;;
         -h|--help)
-            sed -n '2,12p' "$0"
+            sed -n '2,16p' "$0"
             exit 0
             ;;
         *)
@@ -47,6 +54,7 @@ done
 
 info() { printf '%s\n' "$*"; }
 warn() { printf '警告: %s\n' "$*" >&2; }
+die() { printf '错误: %s\n' "$*" >&2; exit 1; }
 
 # ---------- 环境检测 ----------
 
@@ -83,6 +91,123 @@ else
     warn "未识别的操作系统 $OS，按无 systemd 的独立脚本方案生成"
 fi
 
+# ---------- 读取旧配置 ----------
+
+SRC_CONFIG=""
+SRC_ENV=""
+
+find_source() {
+    if [ -n "$SOURCE_DIR" ]; then
+        [ -f "$SOURCE_DIR/config.json" ] && SRC_CONFIG="$SOURCE_DIR/config.json"
+        [ -f "$SOURCE_DIR/env" ] && SRC_ENV="$SOURCE_DIR/env"
+        return
+    fi
+    if [ "$SYSTEMD" = yes ]; then
+        frag=$(systemctl show alidns-ddns.service -p FragmentPath --value 2>/dev/null || true)
+        unit_dir=$(dirname "$frag" 2>/dev/null || true)
+        envfiles=$(systemctl show alidns-ddns.service -p EnvironmentFile --value 2>/dev/null || true)
+        envfile=${envfiles%% *}
+        envfile=${envfile#-}
+        [ -f "$envfile" ] && SRC_ENV=$envfile
+        [ -n "$unit_dir" ] && [ -f "$unit_dir/config.json" ] && SRC_CONFIG="$unit_dir/config.json"
+    fi
+    for c in /etc/alidns-ddns/config.json "$HOME/.config/alidns-ddns/config.json" ./config.json; do
+        [ -z "$SRC_CONFIG" ] && [ -f "$c" ] && SRC_CONFIG=$c
+    done
+    for e in /etc/alidns-ddns/env "$HOME/.config/alidns-ddns/env" ./env; do
+        [ -z "$SRC_ENV" ] && [ -f "$e" ] && SRC_ENV=$e
+    done
+    # 旧单元可能把配置放在 /etc/alidns-ddns，但 EnvironmentFile 为空
+    if [ -f /etc/alidns-ddns/config.json ]; then
+        SRC_CONFIG=/etc/alidns-ddns/config.json
+    fi
+    if [ -f /etc/alidns-ddns/env ]; then
+        SRC_ENV=/etc/alidns-ddns/env
+    fi
+}
+
+# 从 JSON 取简单字符串/数字/布尔值（旧/新配置都是扁平结构）
+json_get() {
+    key=$1
+    file=$2
+    [ -f "$file" ] || return 0
+    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -1
+}
+
+json_get_raw() {
+    key=$1
+    file=$2
+    [ -f "$file" ] || return 0
+    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\([^,}]*\).*/\1/p" "$file" \
+        | head -1 | sed 's/[[:space:]]//g'
+}
+
+env_get() {
+    key=$1
+    file=$2
+    [ -f "$file" ] || return 0
+    sed -n "s/^[[:space:]]*$key=//p" "$file" | tail -1 \
+        | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//"
+}
+
+# 按优先级从多个来源取第一个非空值：JSON 键… | ENV 键…
+pick_old() {
+    file=$1
+    shift
+    # 环境变量优先于 config.json（与运行时优先级一致）
+    for item in "$@"; do
+        case "$item" in
+            e:*) v=$(env_get "${item#e:}" "$SRC_ENV") ;;
+            *) v= ;;
+        esac
+        if [ -n "$v" ]; then printf '%s' "$v"; return; fi
+    done
+    for item in "$@"; do
+        case "$item" in
+            j:*) v=$(json_get "${item#j:}" "$file") ;;
+            *) v= ;;
+        esac
+        if [ -n "$v" ]; then printf '%s' "$v"; return; fi
+    done
+}
+
+pick_old_raw() {
+    file=$1
+    shift
+    for item in "$@"; do
+        case "$item" in
+            e:*) v=$(env_get "${item#e:}" "$SRC_ENV") ;;
+            *) v= ;;
+        esac
+        if [ -n "$v" ]; then printf '%s' "$v"; return; fi
+    done
+    for item in "$@"; do
+        case "$item" in
+            j:*) v=$(json_get_raw "${item#j:}" "$file") ;;
+            *) v= ;;
+        esac
+        if [ -n "$v" ]; then printf '%s' "$v"; return; fi
+    done
+}
+
+find_source
+
+M_DOMAIN=$(pick_old "$SRC_CONFIG" j:domain j:DomainName e:DDNS_DOMAIN e:ALIDNS_DOMAIN)
+M_RR=$(pick_old "$SRC_CONFIG" j:rr j:RR e:DDNS_RR e:ALIDNS_RR)
+M_IPV=$(pick_old "$SRC_CONFIG" j:ipv j:IPv e:DDNS_IPV)
+M_INTERFACE=$(pick_old "$SRC_CONFIG" j:interface j:Interface e:DDNS_INTERFACE e:ALIDNS_INTERFACE)
+M_PREFER=$(pick_old "$SRC_CONFIG" j:ipv6_prefer j:Ipv6Prefer e:DDNS_IPV6_PREFER e:ALIDNS_IPV6_PREFER)
+M_LINE=$(pick_old "$SRC_CONFIG" j:line j:Line e:DDNS_LINE)
+M_ONCHANGE=$(pick_old "$SRC_CONFIG" j:on_change j:OnChange e:DDNS_ON_CHANGE)
+M_INTERVAL=$(pick_old_raw "$SRC_CONFIG" j:interval j:Interval e:DDNS_INTERVAL)
+M_VERIFY=$(pick_old_raw "$SRC_CONFIG" j:verify_interval j:VerifyInterval e:DDNS_VERIFY_INTERVAL)
+M_TTL=$(pick_old_raw "$SRC_CONFIG" j:ttl j:Ttl e:DDNS_TTL)
+M_ONCHANGETIMEOUT=$(pick_old_raw "$SRC_CONFIG" j:on_change_timeout j:OnChangeTimeout e:DDNS_ON_CHANGE_TIMEOUT)
+M_STATEFILE=$(pick_old "$SRC_CONFIG" j:StateFile e:DDNS_STATE_FILE)
+M_AK=$(pick_old "$SRC_CONFIG" j:AccessKeyID e:ALIBABA_CLOUD_ACCESS_KEY_ID)
+M_SK=$(pick_old "$SRC_CONFIG" j:AccessKeySecret e:ALIBABA_CLOUD_ACCESS_KEY_SECRET)
+M_ALLOWULA=$(pick_old_raw "$SRC_CONFIG" j:allow_ula j:AllowUla e:DDNS_ALLOW_ULA)
+
 # ---------- 方案决策 ----------
 
 PLAN=standalone
@@ -99,12 +224,14 @@ setup_launchd_paths() {
         USER_HOME=$(eval echo "~$TARGET_USER")
         STATE_FILE="$USER_HOME/.local/state/alidns-ddns/state.json"
         PLIST_SRC="$SCRIPT_DIR/alidns-ddns-daemon.plist"
+        PLIST_FILE=/Library/LaunchDaemons/com.tongtf.alidns-ddns.plist
     else
         INSTALL_DIR="$HOME/.local/bin"
         CONFIG_DIR="$HOME/.config/alidns-ddns"
         LOG_DIR="$HOME/Library/Logs"
         STATE_FILE="$HOME/.local/state/alidns-ddns/state.json"
         PLIST_SRC="$SCRIPT_DIR/alidns-ddns.plist"
+        PLIST_FILE="$HOME/Library/LaunchAgents/com.tongtf.alidns-ddns.plist"
     fi
 }
 
@@ -114,7 +241,7 @@ elif [ "$SYSTEMD" = "yes" ]; then
     PLAN=systemd
     if [ "$SYSTEMD_VER" -ge 247 ]; then
         CRED_MODE=loadcredential
-        if [ "$CREDS_TOOL" = yes ] && [ "$SYSTEMD_VER" -ge 250 ]; then
+        if [ "$CREDS_TOOL" = yes ] && [ "$SYSTEMD_VER" -ge 250 ] && [ "$ENCRYPT_AUTO" = yes ]; then
             CRED_MODE=encrypted
         fi
     else
@@ -127,25 +254,26 @@ else
     STATE_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/alidns-ddns/state.json"
 fi
 
-# 允许显式覆盖检测结果（用于测试/特殊环境）
 [ -n "${ADAPT_FORCE_PLAN:-}" ] && PLAN=$ADAPT_FORCE_PLAN
 [ -n "${ADAPT_FORCE_CRED:-}" ] && CRED_MODE=$ADAPT_FORCE_CRED
 [ -n "${ADAPT_FORCE_CONTAINER:-}" ] && CONTAINER=$ADAPT_FORCE_CONTAINER
 [ -n "${ADAPT_FORCE_IPV6:-}" ] && HAS_IPV6=$ADAPT_FORCE_IPV6
 [ "$PLAN" = launchd ] && setup_launchd_paths
-# 非 systemd 平台没有 LoadCredential 机制
 [ "$PLAN" != systemd ] && CRED_MODE=envfile
 
-# 容器里 netlink 多播常被禁；事件订阅虽已有降级，安装时直接关掉更省心
 if [ "$CONTAINER" = yes ] && [ "$PLAN" != launchd ]; then
     EXTRA_ARGS="--no-events"
 fi
 
-if [ "$HAS_IPV6" = yes ]; then
-    IPV_MODE=46
-else
-    IPV_MODE=4
-    warn "未检测到全局 IPv6，配置默认只维护 A 记录（可后续改 DDNS_IPV=46）"
+# 迁移值优先于环境探测；都没有才用探测默认
+[ -n "$M_IPV" ] && IPV_MODE=$M_IPV || IPV_MODE=""
+[ -z "$IPV_MODE" ] && IPV_MODE=$([ "$HAS_IPV6" = yes ] && echo 46 || echo 4)
+[ -n "$M_STATEFILE" ] && STATE_FILE=$M_STATEFILE
+
+# 没有可迁移的密钥时，凭据模式降级为 env，避免生成引用不存在凭据文件的单元
+if [ "$CRED_MODE" != envfile ] && { [ -z "$M_AK" ] || [ -z "$M_SK" ]; }; then
+    warn "未找到 AK/SK，凭证方式降为 EnvironmentFile（请手工填写 env）"
+    CRED_MODE=envfile
 fi
 
 case "$CRED_MODE" in
@@ -160,12 +288,20 @@ info "systemd: $SYSTEMD (版本 ${SYSTEMD_VER:-0})"
 info "容器: $CONTAINER"
 info "全局 IPv6: $HAS_IPV6"
 info "systemd-creds: $CREDS_TOOL"
+info "=== 来源 ==="
+info "config: ${SRC_CONFIG:-未找到}"
+info "env:    ${SRC_ENV:-未找到}"
 info "=== 选定方案 ==="
 info "启动方式: $PLAN"
 info "凭证方式: $CRED_DESC"
 info "IP 模式: $IPV_MODE"
 info "附加参数: ${EXTRA_ARGS:-无}"
 info "输出目录: $OUTPUT_DIR"
+if [ -n "$M_AK" ] && [ -n "$M_SK" ]; then
+    info "AK/SK: 已从旧配置读取，将自动写入 $CRED_MODE"
+else
+    warn "未从旧配置读到 AK/SK；生成文件会留占位符，需手工填写"
+fi
 info ""
 
 if [ "$DRY_RUN" = yes ]; then
@@ -187,36 +323,72 @@ write_file() {
 
 mkdir -p "$OUTPUT_DIR"
 
+json_default() { [ -n "$1" ] && printf '%s' "$1" || printf '%s' "$2"; }
+bool_default() { case "$1" in true|false) printf '%s' "$1" ;; *) printf '%s' "$2" ;; esac; }
+
 write_file "$OUTPUT_DIR/config.json" <<EOF
 {
-    "domain": "",
-    "rr": "@",
+    "domain": "$(json_default "$M_DOMAIN" '')",
+    "rr": "$(json_default "$M_RR" '@')",
     "ipv": "$IPV_MODE",
-    "interval": 300,
-    "verify_interval": 21600,
-    "ttl": 600,
-    "line": "default",
-    "ipv6_prefer": "auto",
-    "allow_ula": false,
-    "interface": "",
-    "on_change": "",
-    "on_change_timeout": 60
+    "interval": $(json_default "$M_INTERVAL" 300),
+    "verify_interval": $(json_default "$M_VERIFY" 21600),
+    "ttl": $(json_default "$M_TTL" 600),
+    "line": "$(json_default "$M_LINE" 'default')",
+    "ipv6_prefer": "$(json_default "$M_PREFER" 'auto')",
+    "allow_ula": $(bool_default "$M_ALLOWULA" false),
+    "interface": "$(json_default "$M_INTERFACE" '')",
+    "on_change": "$(json_default "$M_ONCHANGE" '')",
+    "on_change_timeout": $(json_default "$M_ONCHANGETIMEOUT" 60)
 }
 EOF
 
-if [ "$PLAN" = systemd ] && [ "$SYSTEMD_VER" -ge 247 ]; then
+# 状态路径：现代 systemd 自动推导，其余写入 env
+if [ -z "$M_STATEFILE" ] && [ "$PLAN" = systemd ] && [ "$SYSTEMD_VER" -ge 247 ]; then
     STATE_LINE="# DDNS_STATE_FILE  # systemd StateDirectory 自动推导"
 else
     STATE_LINE="DDNS_STATE_FILE=$STATE_FILE"
 fi
 
+# 凭证：密文/明文凭据文件，或写入 env（绝不进 config.json）
+CRED_LINES="ALIBABA_CLOUD_ACCESS_KEY_ID=
+ALIBABA_CLOUD_ACCESS_KEY_SECRET="
+case "$CRED_MODE" in
+    encrypted|loadcredential)
+        if [ -n "$M_AK" ] && [ -n "$M_SK" ]; then
+            ( umask 077
+              printf '%s' "$M_AK" > "$OUTPUT_DIR/access_key_id"
+              printf '%s' "$M_SK" > "$OUTPUT_DIR/access_key_secret"
+            )
+            if [ "$CRED_MODE" = encrypted ]; then
+                if printf '%s' "$M_SK" | systemd-creds encrypt --with-key=host \
+                    --name=alidns-access-key-secret - "$OUTPUT_DIR/alidns-access-key-secret.cred" 2>/dev/null \
+                   && printf '%s' "$M_AK" | systemd-creds encrypt --with-key=host \
+                    --name=alidns-access-key-id - "$OUTPUT_DIR/alidns-access-key-id.cred" 2>/dev/null; then
+                    rm -f "$OUTPUT_DIR/access_key_id" "$OUTPUT_DIR/access_key_secret"
+                    CRED_LINES="# AK/SK 已加密为 *.cred（见输出目录）"
+                else
+                    warn "systemd-creds 加密失败，退回明文凭据文件（600）"
+                    rm -f "$OUTPUT_DIR"/*.cred
+                    CRED_MODE=loadcredential
+                fi
+            fi
+            [ "$CRED_MODE" = loadcredential ] && CRED_LINES="# AK/SK 已写入明文凭据文件（600）"
+        fi
+        ;;
+    envfile)
+        if [ -n "$M_AK" ] && [ -n "$M_SK" ]; then
+            CRED_LINES="ALIBABA_CLOUD_ACCESS_KEY_ID=$M_AK
+ALIBABA_CLOUD_ACCESS_KEY_SECRET=$M_SK"
+        fi
+        ;;
+esac
+
 write_file "$OUTPUT_DIR/env" <<EOF
 # 由 adapt-install.sh 生成（$OS / $PLAN / $CRED_MODE）
-# 凭证（只放这里或 LoadCredential，不要写进 config.json）
-# ALIBABA_CLOUD_ACCESS_KEY_ID=
-# ALIBABA_CLOUD_ACCESS_KEY_SECRET=
+# 域名在 config.json；这里只放凭证与部署覆盖
+$CRED_LINES
 
-# 部署覆盖（可选）
 $STATE_LINE
 # DDNS_NO_EVENTS=0
 # DDNS_VERBOSE=0
@@ -225,7 +397,7 @@ chmod 600 "$OUTPUT_DIR/env" 2>/dev/null || true
 
 if [ "$PLAN" = systemd ]; then
     if [ -f "$SCRIPT_DIR/alidns-ddns.service" ]; then
-        tmp="$OUTPUT_DIR/alidns-ddns.service"
+        tmp="$OUTPUT_DIR/.alidns-ddns.service.tmp"
         cp "$SCRIPT_DIR/alidns-ddns.service" "$tmp"
         if [ -n "$EXTRA_ARGS" ]; then
             sed -i.bak "s|^ExecStart=\(.*\)$|ExecStart=\1 $EXTRA_ARGS|" "$tmp"
@@ -241,7 +413,8 @@ if [ "$PLAN" = systemd ]; then
                 rm -f "$tmp.bak"
                 ;;
         esac
-        [ -e "$OUTPUT_DIR/alidns-ddns.service" ] && [ "$FORCE" != yes ] || cp "$tmp" "$OUTPUT_DIR/alidns-ddns.service"
+        cp "$tmp" "$OUTPUT_DIR/alidns-ddns.service"
+        rm -f "$tmp"
         info "已生成: $OUTPUT_DIR/alidns-ddns.service"
     else
         warn "找不到模板 alidns-ddns.service，跳过服务单元生成"
@@ -258,11 +431,10 @@ elif [ "$PLAN" = launchd ]; then
     else
         warn "找不到 launchd 模板，跳过 plist 生成"
     fi
-elif [ "$PLAN" = standalone ]; then
+else
     BIN=$(command -v alidns-ddns 2>/dev/null || echo /usr/local/bin/alidns-ddns)
     write_file "$OUTPUT_DIR/run-alidns-ddns.sh" <<EOF
 #!/bin/sh
-# 前台运行，适合 runit / supervisord / Docker ENTRYPOINT
 set -eu
 BASE_DIR=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
 set -a
@@ -274,45 +446,74 @@ EOF
 fi
 
 write_file "$OUTPUT_DIR/README.generated.txt" <<EOF
-由 adapt-install.sh 生成：OS=$OS, ARCH=$ARCH, systemd=$SYSTEMD/$SYSTEMD_VER,
-容器=$CONTAINER, IPv6=$HAS_IPV6, 方案=$PLAN, 凭证=$CRED_MODE。
+由 adapt-install.sh 生成：OS=$OS, systemd=$SYSTEMD/$SYSTEMD_VER,
+来源 config=${SRC_CONFIG:-无}, env=${SRC_ENV:-无}
+方案=$PLAN, 凭证=$CRED_MODE, IP 模式=$IPV_MODE。
 
-下一步（通用）：
-1) 编辑 config.json，填入 domain（和需要的 rr / ipv 等）。
-   密钥不要写进 config.json，只从 env 或 LoadCredential 提供。
-2) 把生成的文件复制到目标位置（见下方对应方案）。
+生成文件：
+  config.json        新格式业务配置（密钥已移除）
+  env                凭证（$CRED_MODE）+ 部署覆盖，600
+  $([ "$CRED_MODE" = encrypted ] && echo '*.cred  AK/SK 密文（systemd-creds）' || true)
+  $([ "$PLAN" = systemd ] && echo 'alidns-ddns.service' || true)
+  $([ "$PLAN" = launchd ] && echo 'com.tongtf.alidns-ddns.plist' || true)
+  $([ "$PLAN" = standalone ] && echo 'run-alidns-ddns.sh' || true)
 
-systemd 方案：
-  sudo cp $OUTPUT_DIR/config.json /etc/alidns-ddns/config.json
-  sudo cp $OUTPUT_DIR/env /etc/alidns-ddns/env
-  sudo cp $OUTPUT_DIR/alidns-ddns.service /etc/systemd/system/alidns-ddns.service
-  sudo systemctl daemon-reload
-  sudo systemctl enable --now alidns-ddns
-
-凭证（$CRED_MODE）：
-  envfile: 在 /etc/alidns-ddns/env 里填 ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET；
-           域名写在 config.json 的 domain 字段
-  loadcredential:
-    printf '%s' 'AKID' | sudo tee /etc/alidns-ddns/access_key_id >/dev/null
-    printf '%s' 'SECRET' | sudo tee /etc/alidns-ddns/access_key_secret >/dev/null
-    sudo chmod 600 /etc/alidns-ddns/access_key_*
-  encrypted (systemd >= 250):
-    sudo systemd-creds setup
-    printf '%s' 'AKID' | sudo systemd-creds encrypt --with-key=host \\
-      --name=alidns-access-key-id - /etc/alidns-ddns/alidns-access-key-id.cred
-    printf '%s' 'SECRET' | sudo systemd-creds encrypt --with-key=host \\
-      --name=alidns-access-key-secret - /etc/alidns-ddns/alidns-access-key-secret.cred
-    详见 README「可选：加密凭据」。
-
-launchd（macOS）：
-  把 plist 放到 ~/Library/LaunchAgents/（用户级）或 /Library/LaunchDaemons/（root），
-  二进制与配置放到 plist 里写的路径，然后 launchctl bootstrap / kickstart。
-  详见 README macOS 部署章节。
-
-无 systemd（standalone）：
-  把目录放到固定位置，直接执行 run-alidns-ddns.sh（前台），
-  或交给 runit / supervisord / Docker 管理。状态文件由 DDNS_STATE_FILE 指定。
+--apply 会把以上文件复制到系统目录、备份旧文件、重载 systemd 并重启服务。
+若无 AK/SK，请先填写 env 或重新用 systemd-creds 生成 .cred 后再启动。
 EOF
+
+# ---------- 可选安装 ----------
+
+if [ "$APPLY" = yes ]; then
+    if [ "$PLAN" = standalone ]; then
+        warn "standalone 模式没有系统服务可安装；请把输出目录放到固定位置并运行 run-alidns-ddns.sh"
+        exit 0
+    fi
+    if [ "$ASSUME_YES" != yes ]; then
+        printf '将安装到系统目录并重启 alidns-ddns 服务，继续？[y/N] '
+        read -r answer
+        case "$answer" in y|Y|yes|YES) ;; *) info "已取消"; exit 0 ;; esac
+    fi
+    if [ "$PLAN" = systemd ]; then
+        TARGET_CONFIG=/etc/alidns-ddns/config.json
+        TARGET_ENV=/etc/alidns-ddns/env
+        mkdir -p /etc/alidns-ddns
+    else
+        TARGET_CONFIG=$CONFIG_DIR/config.json
+        TARGET_ENV=$CONFIG_DIR/env
+        mkdir -p "$CONFIG_DIR" "$LOG_DIR" "$INSTALL_DIR"
+    fi
+    for f in "$TARGET_CONFIG" "$TARGET_ENV"; do
+        [ -f "$f" ] && cp -p "$f" "$f.bak.$(date +%Y%m%d%H%M%S)"
+    done
+    cp "$OUTPUT_DIR/config.json" "$TARGET_CONFIG"
+    cp "$OUTPUT_DIR/env" "$TARGET_ENV"
+    chmod 644 "$TARGET_CONFIG"
+    chmod 600 "$TARGET_ENV"
+
+    if [ "$CRED_MODE" = encrypted ] || [ "$CRED_MODE" = loadcredential ]; then
+        for cred in "$OUTPUT_DIR"/*.cred "$OUTPUT_DIR/access_key_id" "$OUTPUT_DIR/access_key_secret"; do
+            [ -f "$cred" ] || continue
+            cp "$cred" "/etc/alidns-ddns/$(basename "$cred")"
+            chmod 600 "/etc/alidns-ddns/$(basename "$cred")"
+        done
+    fi
+
+    if [ "$PLAN" = systemd ]; then
+        cp "$OUTPUT_DIR/alidns-ddns.service" /etc/systemd/system/alidns-ddns.service
+        systemctl daemon-reload
+        if systemctl is-enabled --quiet alidns-ddns.service 2>/dev/null; then
+            systemctl restart alidns-ddns.service
+        else
+            systemctl enable --now alidns-ddns.service
+        fi
+        info "已安装并启动 alidns-ddns.service"
+    else
+        mkdir -p "$(dirname "$PLIST_FILE")"
+        cp "$OUTPUT_DIR/com.tongtf.alidns-ddns.plist" "$PLIST_FILE"
+        info "已安装 launchd plist：$PLIST_FILE（请按 README 执行 bootstrap/kickstart）"
+    fi
+fi
 
 info ""
 info "完成。请先阅读 $OUTPUT_DIR/README.generated.txt"
