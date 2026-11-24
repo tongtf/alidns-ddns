@@ -11,12 +11,19 @@
 use crate::select::{V6Cand, V6Kind, V6State};
 use std::net::Ipv6Addr;
 
-// IFA_F_*（/usr/include/linux/if_addr.h）
+// IFA_F_*（/usr/include/linux/if_addr.h）。macOS 只在单测里用到，
+// 非测试构建下允许 dead_code 以通过 clippy -D warnings。
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 const IFA_F_TEMPORARY: u32 = 0x01;
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 const IFA_F_OPTIMISTIC: u32 = 0x04;
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 const IFA_F_DADFAILED: u32 = 0x08;
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 const IFA_F_DEPRECATED: u32 = 0x20;
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 const IFA_F_TENTATIVE: u32 = 0x40;
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 const IFA_F_PERMANENT: u32 = 0x80;
 
 /// 从 netlink `IFA_ADDRESS` 属性负载解析 IPv6（网络字节序的 16 字节）。

@@ -86,7 +86,7 @@ pub fn parse_ifconfig(text: &str) -> Result<Vec<V6Cand>, String> {
             continue;
         };
 
-        let has = |key: &str| tokens.iter().any(|t| *t == key);
+        let has = |key: &str| tokens.contains(&key);
         let mut pltime = None;
         let mut vltime = None;
         for (i, tok) in tokens.iter().enumerate() {
@@ -95,7 +95,7 @@ pub fn parse_ifconfig(text: &str) -> Result<Vec<V6Cand>, String> {
                 "pltime" => pltime = next.and_then(|s| s.parse::<u64>().ok()),
                 "vltime" => vltime = next.and_then(|s| s.parse::<u64>().ok()),
                 "scopeid" => {
-                    ifindex = next.and_then(|s| parse_scopeid(s)).unwrap_or(0);
+                    ifindex = next.and_then(parse_scopeid).unwrap_or(0);
                 }
                 _ => {}
             }
