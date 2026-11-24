@@ -487,6 +487,21 @@ CapabilityBoundingSet=
 - systemd 单元加 `StateDirectory=alidns-ddns`，在 `DynamicUser` + `ProtectSystem=strict` 下获得可写私有目录
 - `--dry-run` 不写状态文件；常驻与 timer 共用同一状态，只能启用其中一种形态
 
+## 8.2 macOS 地址发现（已实现）
+
+macOS 的 `getifaddrs()` 与 Linux 一样只有接口标志（`IFF_*`），拿不到地址标志和生命周期。
+但 `/sbin/ifconfig -a -L` 会输出 `autoconf` / `temporary` / `deprecated` / `tentative` /
+`permanent` 等关键字以及 `pltime` / `vltime`（秒），语义与 netlink 的 `IFA_FLAGS` +
+`IFA_CACHEINFO` 基本等价。
+
+实现：`src/discover/ipv6_macos.rs` 纯函数解析 `ifconfig -a -L`（`LC_ALL=C`），把上述字段
+映射到 `V6Cand`，从而复用 Linux 侧同一套桶序、cstamp/valid_lft 排序和"过期前提前复查"
+的自适应调度。macOS 没有 `cstamp`，同桶比较退回到 `valid_lft`，新 SLAAC 地址寿命更长自然胜出。
+`ifconfig` 不可用或格式变化时告警并回退到原有的 `local-ip-address`，不会比旧实现差。
+零新增依赖，7 个 fixture 单测。
+
+仍缺：macOS 的地址变更事件通知（SystemConfiguration FFI），目前只能靠轮询。
+
 ## 9. 非目标
 
 - 不引入 async runtime（tokio 等）：单线程阻塞模型足够

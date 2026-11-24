@@ -24,7 +24,8 @@ sha2 = "0.10"
 [target.'cfg(target_os = "linux")'.dependencies]
 neli = "0.7"
 
-# 非 Linux：保留原有实现（有地址但拿不到生命周期/地址标志）。
+# 非 Linux：macOS 优先用 ifconfig -L（零依赖）拿到地址标志与生命周期，
+# 失败时回退到 local-ip-address；其他平台只有后者。
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 local-ip-address = "0.6"
 

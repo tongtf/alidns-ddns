@@ -62,11 +62,11 @@ cargo clippy                 # lint（无预配置的门控）
 upx --best target/release/alidns-ddns  # 可选压缩
 ```
 
-无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（60 个单测）。
+无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（60 个单测，macOS 另有 7 个地址解析单测）。
 
 ## 关键行为
 
-1. 每轮 `discover`：IPv4 多端点回退（`api.ipify.org` → `v4.ident.me` → `ip.3322.net` → `ipv4.icanhazip.com` → `checkip.amazonaws.com`，8s 超时、端点粘性、公网性校验）；IPv6 在 Linux 走 netlink，macOS 退回 `local-ip-address`
+1. 每轮 `discover`：IPv4 多端点回退（`api.ipify.org` → `v4.ident.me` → `ip.3322.net` → `ipv4.icanhazip.com` → `checkip.amazonaws.com`，8s 超时、端点粘性、公网性校验）；IPv6 在 Linux 走 netlink `RTM_GETADDR`，macOS 解析 `ifconfig -a -L`（`temporary`/`deprecated`/`tentative` 标志 + `pltime`/`vltime` 寿命，零新增依赖），解析失败才回退 `local-ip-address` 并告警
 2. `plan::diff` 对每个域名生成计划：DNS 查询按域名批量（`PageSize=500` 自动翻页），匹配 `RR + Line + Type`，显式传 TTL
 3. `apply`：IP 变化时更新 / 新建 A / AAAA；`Status=Disable` 告警、Locked 跳过
 4. `schedule`：默认 300s；刚变更后 60s 内复查；`preferred_lft` 快到期时提前唤醒；失败指数退避 30s→5min；Linux 订阅 `RTMGRP_IPV6_IFADDR` 事件提前唤醒

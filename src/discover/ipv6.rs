@@ -156,9 +156,30 @@ pub fn scan() -> Result<Vec<V6Cand>, String> {
     Ok(out)
 }
 
-/// 非 Linux：没有 netlink。退回原有实现——能拿到地址，但拿不到地址标志与生命周期。
-#[cfg(not(target_os = "linux"))]
+/// macOS：`ifconfig -a -L` 能给出地址标志与 pltime/vltime，语义与 netlink 基本等价。
+/// 解析失败时回退到 `local-ip-address`，并打印 warning 告知用户寿命信息缺失。
+#[cfg(target_os = "macos")]
 pub fn scan() -> Result<Vec<V6Cand>, String> {
+    match super::ipv6_macos::scan() {
+        Ok(cands) => Ok(cands),
+        Err(e) => {
+            crate::log::warn(format!(
+                "ifconfig -L 解析失败（{e}），回退到 local-ip-address：无法区分临时/弃用地址，\
+                也无法按生命周期提前复查"
+            ));
+            scan_via_local_ip_address()
+        }
+    }
+}
+
+/// 其他非 Linux / 非 macOS 平台的兜底：能拿到地址，但没有标志与生命周期。
+#[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
+pub fn scan() -> Result<Vec<V6Cand>, String> {
+    scan_via_local_ip_address()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn scan_via_local_ip_address() -> Result<Vec<V6Cand>, String> {
     let netifs = local_ip_address::list_afinet_netifas().map_err(|e| e.to_string())?;
     Ok(netifs
         .into_iter()

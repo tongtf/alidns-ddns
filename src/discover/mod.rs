@@ -2,6 +2,8 @@
 
 pub mod ipv4;
 pub mod ipv6;
+#[cfg(target_os = "macos")]
+pub mod ipv6_macos;
 
 use crate::config::Config;
 use crate::log;
