@@ -263,6 +263,8 @@ fi
 [ -n "${ADAPT_FORCE_CONTAINER:-}" ] && CONTAINER=$ADAPT_FORCE_CONTAINER
 [ -n "${ADAPT_FORCE_IPV6:-}" ] && HAS_IPV6=$ADAPT_FORCE_IPV6
 [ -n "${ADAPT_FORCE_UNIT:-}" ] && DEPLOYED_UNIT=$ADAPT_FORCE_UNIT
+[ -z "$DEPLOYED_UNIT" ] && [ -f /etc/systemd/system/alidns-ddns.service ] \
+    && DEPLOYED_UNIT=/etc/systemd/system/alidns-ddns.service
 [ -n "${ADAPT_FORCE_PLIST:-}" ] && DEPLOYED_PLIST=$ADAPT_FORCE_PLIST
 [ "$PLAN" = launchd ] && setup_launchd_paths
 [ "$PLAN" = launchd ] && [ -f "$PLIST_FILE" ] && DEPLOYED_PLIST=$PLIST_FILE
@@ -394,19 +396,19 @@ case "$CRED_MODE" in
               printf '%s' "$M_SK" > "$OUTPUT_DIR/access_key_secret"
             )
             if [ "$CRED_MODE" = encrypted ]; then
-                if [ -z "$SUDO" ]; then
-                    warn "systemd-creds 加密需要 root（host key 仅 root 可读）；退回明文凭据文件（600）。可用 sudo 重跑以启用加密"
+                if [ "$(id -u)" -ne 0 ] && [ -z "$SUDO" ]; then
+                    warn "systemd-creds 加密需要 root（host key 仅 root 可读）；退回明文凭据文件（600）。请用 sudo 重跑以启用加密"
                     rm -f "$OUTPUT_DIR"/*.cred
                     CRED_MODE=loadcredential
                 elif printf '%s' "$M_SK" | $SUDO systemd-creds encrypt --with-key=host \
-                    --name=alidns-access-key-secret - "$OUTPUT_DIR/alidns-access-key-secret.cred" 2>/dev/null \
+                    --name=alidns-access-key-secret - "$OUTPUT_DIR/alidns-access-key-secret.cred" \
                    && printf '%s' "$M_AK" | $SUDO systemd-creds encrypt --with-key=host \
-                    --name=alidns-access-key-id - "$OUTPUT_DIR/alidns-access-key-id.cred" 2>/dev/null; then
+                    --name=alidns-access-key-id - "$OUTPUT_DIR/alidns-access-key-id.cred"; then
                     $SUDO chown "$(id -u):$(id -g)" "$OUTPUT_DIR"/*.cred 2>/dev/null || true
                     rm -f "$OUTPUT_DIR/access_key_id" "$OUTPUT_DIR/access_key_secret"
                     CRED_LINES="# AK/SK 已加密为 *.cred（见输出目录）"
                 else
-                    warn "systemd-creds 加密失败，退回明文凭据文件（600）"
+                    warn "systemd-creds 加密失败（见上方错误），退回明文凭据文件（600）"
                     rm -f "$OUTPUT_DIR"/*.cred
                     CRED_MODE=loadcredential
                 fi
