@@ -40,7 +40,7 @@ pub fn observe(cfg: &Config, http: &Http, probe: &mut ipv4::Probe, state: &mut S
             Some(ip) => {
                 log::debug(format!(
                     "公网 IPv4: {ip}（来源 {}）",
-                    probe.endpoint().unwrap_or("?")
+                    probe.sticky_endpoint().unwrap_or("?")
                 ));
                 desired.v4 = Some(IpAddr::V4(ip));
             }
@@ -106,6 +106,31 @@ pub fn observe(cfg: &Config, http: &Http, probe: &mut ipv4::Probe, state: &mut S
                 // 源地址作为降级候选（只有地址，没有生命周期），仍按同一套策略过滤。
                 match ipv6::kernel_source_addr() {
                     Some(addr) => {
+                        // 降级路径也必须尊重 --interface：无法证明源地址属于指定网卡时
+                        // 宁可跳过 AAAA，也不能悄悄换成另一张网卡的地址。
+                        if !cfg.interface.is_empty() {
+                            match ipv6::interface_name_for(addr) {
+                                Some(name) if name == cfg.interface => {}
+                                Some(name) => {
+                                    if state.warn_once("v6-fallback-iface-mismatch") {
+                                        log::warn(format!(
+                                            "降级地址 {addr} 属于 {name}，与指定网卡 {} 不符；跳过 AAAA",
+                                            cfg.interface
+                                        ));
+                                    }
+                                    return desired;
+                                }
+                                None => {
+                                    if state.warn_once("v6-fallback-iface-unknown") {
+                                        log::warn(format!(
+                                            "无法确定降级地址 {addr} 所属网卡；指定 {} 时跳过 AAAA",
+                                            cfg.interface
+                                        ));
+                                    }
+                                    return desired;
+                                }
+                            }
+                        }
                         let cand = V6Cand {
                             ifindex: 0,
                             ifname: "(udp-route)".into(),

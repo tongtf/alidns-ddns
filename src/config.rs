@@ -561,6 +561,25 @@ fn load_file(path: &str) -> Result<FileConfig, String> {
     }
 }
 
+/// 按 DNS label 规则校验域名：非法域名应在配置阶段退出 78，
+/// 而不是等到 API 返回 InvalidDomainName 后无限退避。
+fn valid_domain(d: &str) -> bool {
+    if d.is_empty() || d.len() > 253 {
+        return false;
+    }
+    d.split('.').all(|label| {
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        let bytes = label.as_bytes();
+        bytes[0].is_ascii_alphanumeric()
+            && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+    })
+}
+
 /// 展开 域名 × RR 笛卡尔目标，再按 IP 模式拆成 A / AAAA。
 ///
 /// 配对规则保持旧行为：一对多、多对一、等长配对；其余报错。
@@ -587,7 +606,7 @@ fn expand_targets(
         return Err("RR 为空".into());
     }
     for d in &domains {
-        if d.contains('/') || d.contains(' ') || d.starts_with('.') || d.ends_with('.') {
+        if !valid_domain(d) {
             return Err(format!("域名格式不合法: {d}"));
         }
     }
@@ -661,6 +680,18 @@ mod tests {
     #[test]
     fn expand_rejects_mismatch() {
         assert!(expand_targets("a.com,b.com", "@,www,x", "default", false, true).is_err());
+    }
+
+    #[test]
+    fn invalid_domains_are_rejected_early() {
+        for d in [
+            "a..com", "-a.com", "a-.com", "a/b.com", "a b.com", ".a.com", "a.com.",
+        ] {
+            assert!(!valid_domain(d), "{d} 应被拒绝");
+        }
+        for d in ["a.com", "xn--fiqs8s.com", "a-b.example.com"] {
+            assert!(valid_domain(d), "{d} 应被接受");
+        }
     }
 
     #[test]

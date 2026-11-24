@@ -259,13 +259,22 @@ impl State {
     /// 记录一个"无法写入"的目标：缓存 DNS 里的真实值，而不是期望值。
     /// 这样下一轮仍会发现值不一致，用户解锁后可立即被对账修正。
     pub fn note_skipped(&mut self, target: &Target, actual: &str) {
-        self.entries.insert(
-            target.clone(),
-            Entry {
-                value: actual.to_string(),
-                checked_at: Instant::now(),
-            },
-        );
+        // 长期锁定的记录每轮都会 Skip；真实值没变时不要重复刷新缓存/写盘
+        if let Some(e) = self.entries.get_mut(target) {
+            if e.value == actual {
+                return;
+            }
+            e.value = actual.to_string();
+            e.checked_at = Instant::now();
+        } else {
+            self.entries.insert(
+                target.clone(),
+                Entry {
+                    value: actual.to_string(),
+                    checked_at: Instant::now(),
+                },
+            );
+        }
         self.dirty = true;
     }
 
@@ -304,8 +313,11 @@ impl State {
     /// 同一告警只打印一次（跨进程重启，24h 后重新允许）。返回 true 表示应打印。
     pub fn warn_once(&mut self, key: impl Into<String>) -> bool {
         let key = key.into();
-        if self.warned_at.contains_key(&key) {
-            return false;
+        // 常驻进程里也必须让告警过期，否则启动早期的一次故障会让同类告警永久静默
+        if let Some(at) = self.warned_at.get(&key) {
+            if now_unix() - *at < WARN_TTL_SECS {
+                return false;
+            }
         }
         self.warned_at.insert(key, now_unix());
         self.dirty = true;
@@ -371,6 +383,29 @@ mod tests {
         s.note_synced(&t, "::1");
         assert!(!s.needs_lookup(&t, "::1", Duration::from_secs(3600)));
         assert!(s.needs_lookup(&t, "::1", Duration::ZERO));
+    }
+
+    #[test]
+    fn warning_expires_inside_running_process() {
+        let mut s = State::default();
+        assert!(s.warn_once("v4-probe-failed"));
+        assert!(!s.warn_once("v4-probe-failed"));
+        s.warned_at
+            .insert("v4-probe-failed".into(), now_unix() - WARN_TTL_SECS - 1);
+        assert!(s.warn_once("v4-probe-failed"));
+    }
+
+    #[test]
+    fn note_skipped_does_not_rewrite_unchanged_value() {
+        let t = target();
+        let mut s = State::default();
+        s.note_skipped(&t, "2408::old");
+        assert!(s.dirty);
+        s.dirty = false;
+        s.note_skipped(&t, "2408::old");
+        assert!(!s.dirty, "值未变化不应再次标脏");
+        s.note_skipped(&t, "2408::new");
+        assert!(s.dirty);
     }
 
     #[test]

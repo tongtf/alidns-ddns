@@ -227,6 +227,48 @@ fn interface_names() -> std::collections::HashMap<u32, String> {
     map
 }
 
+/// 从 `/proc/net/if_inet6` 找出某地址所属网卡名。
+/// netlink 不可用时用于校验 UDP 降级候选是否仍属于用户指定的网卡。
+#[cfg(target_os = "linux")]
+pub fn interface_name_for(addr: Ipv6Addr) -> Option<String> {
+    let text = std::fs::read_to_string("/proc/net/if_inet6").ok()?;
+    let index = parse_proc_inet6_index(&text, addr)?;
+    interface_names().get(&index).cloned()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn interface_name_for(_addr: Ipv6Addr) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn parse_proc_inet6_index(text: &str, target: Ipv6Addr) -> Option<u32> {
+    let want = target.octets();
+    for line in text.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(hex) = fields.next() else { continue };
+        if hex.len() != 32 {
+            continue;
+        }
+        let mut bytes = [0u8; 16];
+        let mut ok = true;
+        for (i, b) in bytes.iter_mut().enumerate() {
+            match u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16) {
+                Ok(v) => *b = v,
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok || bytes != want {
+            continue;
+        }
+        return fields.next().and_then(|s| u32::from_str_radix(s, 16).ok());
+    }
+    None
+}
+
 /// 订阅 `RTMGRP_IPV6_IFADDR`，地址增删时立刻唤醒主循环。
 ///
 /// 失败（无 netlink 权限、容器限制）时返回 `None`，主循环退回纯定时轮询。
@@ -340,6 +382,20 @@ mod tests {
     #[test]
     fn cacheinfo_short_payload() {
         assert_eq!(decode_cacheinfo(&[0u8; 8]), None);
+    }
+
+    #[test]
+    fn proc_inet6_index_parses() {
+        let text = "00000000000000000000000000000001 01 80 10 80 lo\n\
+20010db8000000000000000000000001 02 40 00 20 eth0\n";
+        assert_eq!(
+            parse_proc_inet6_index(text, "2001:db8::1".parse().unwrap()),
+            Some(2)
+        );
+        assert_eq!(
+            parse_proc_inet6_index(text, "2408::1".parse().unwrap()),
+            None
+        );
     }
 
     #[test]

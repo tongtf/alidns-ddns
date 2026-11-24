@@ -31,11 +31,16 @@ pub enum ApiError {
     Clock(String),
     /// 参数 / 业务错误：只影响当前目标。
     Param(String),
+    /// 域名级配置错误（如 InvalidDomainName）：重试无意义，必须退出 78。
+    Config(String),
 }
 
 impl ApiError {
     pub fn fatal(&self) -> bool {
-        matches!(self, ApiError::Auth(_) | ApiError::Clock(_))
+        matches!(
+            self,
+            ApiError::Auth(_) | ApiError::Clock(_) | ApiError::Config(_)
+        )
     }
 
     pub fn message(&self) -> &str {
@@ -44,7 +49,8 @@ impl ApiError {
             | ApiError::Throttled(m)
             | ApiError::Auth(m)
             | ApiError::Clock(m)
-            | ApiError::Param(m) => m,
+            | ApiError::Param(m)
+            | ApiError::Config(m) => m,
         }
     }
 }
@@ -57,6 +63,7 @@ impl std::fmt::Display for ApiError {
             ApiError::Auth(_) => "鉴权",
             ApiError::Clock(_) => "时钟",
             ApiError::Param(_) => "参数",
+            ApiError::Config(_) => "配置",
         };
         write!(f, "{kind}错误: {}", self.message())
     }
@@ -84,8 +91,7 @@ impl Client {
     fn call(&self, action: &str, params: BTreeMap<String, String>) -> Result<String, ApiError> {
         let ts = now_rfc3339();
         let nonce = nonce();
-        let signed = sign::sign(action, &params, &self.ak, &self.sk, &ts, &nonce)
-            .map_err(|e| ApiError::Param(format!("构造 {action} 请求失败: {e}")))?;
+        let signed = sign::sign(action, &params, &self.ak, &self.sk, &ts, &nonce);
 
         let mut req = self.agent.get(&signed.url);
         for (k, v) in &signed.headers {
@@ -326,6 +332,13 @@ mod tests {
         assert!(matches!(classify(503, ""), ApiError::Transport(_)));
         assert!(matches!(classify(429, ""), ApiError::Throttled(_)));
         assert!(classify(403, "").fatal());
+    }
+
+    #[test]
+    fn domain_config_error_is_fatal() {
+        let e = ApiError::Config("InvalidDomainName".into());
+        assert!(e.fatal());
+        assert!(e.to_string().contains("配置"));
     }
 
     #[test]
