@@ -174,6 +174,12 @@ LoadCredential=alidns-access-key-secret:/etc/alidns-ddns/access_key_secret
 由 systemd 以 root 读取后挂载，服务进程（DynamicUser）无需自己读源文件。
 `config.json` 中的 Secret 仍可用，但会打 warning。
 
+可选加固（systemd ≥ 250）：把 AK/SK 用 `systemd-creds encrypt` 加密成 `.cred` 文件落盘，
+单元改用 `LoadCredentialEncrypted=`。systemd 在启动时解密鉴权后仍挂载明文到
+`$CREDENTIALS_DIRECTORY/`，因此程序侧零改动；样例见
+`examples/alidns-ddns-credentials-encrypted.conf`。host key 位于
+`/var/lib/systemd/credential.secret`，丢失后旧密文不可恢复。
+
 另外：`--access-key-secret` 会出现在 `/proc/<pid>/cmdline`，建议标记为 deprecated。
 
 ### 2.5 日志与退出码

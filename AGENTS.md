@@ -18,6 +18,9 @@ CLI参数（手写解析，支持 `--k=v`） > systemd LoadCredential 文件 > �
 > LoadCredential 仅用于 AK/SK：凭据名 `alidns-access-key-id` / `alidns-access-key-secret`，
 > systemd 把它们挂载到 `$CREDENTIALS_DIRECTORY/`，程序读取其中的文件（自动 trim）。
 > 详见 README「用 systemd LoadCredential 传递凭证」与 `examples/alidns-ddns-credentials.conf`。
+> 可选加密方案：`LoadCredentialEncrypted=` + `systemd-creds encrypt`（systemd ≥ 250），
+> 密文落盘、systemd 启动时解密，程序读到的仍是同样的明文路径，代码无需改动；
+> 样例见 `examples/alidns-ddns-credentials-encrypted.conf`。
 
 ```bash
 # CLI 参数
