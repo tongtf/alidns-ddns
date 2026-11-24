@@ -1,13 +1,13 @@
 //! 运行期状态：最近一次同步值、失败退避、告警去重、IPv4 端点粘性。
 //!
 //! 计时用 `Instant`（单调钟），持久化时用 Unix 秒换算——单调钟的零点每次启动都不同，
-//! 不能跨进程直接保存。时钟异常（回拨/跳变）时把旧记录视为"刚校验过"或"已过期"，
-//! 宁可多查一次 DNS，也不会永久跳过对账。
+//! 不能跨进程直接保存。系统时钟回拨导致时间戳"在未来"时按"刚校验过"处理，
+//! 最长可能跳过一个 `verify_interval` 的对账；但期望 IP 真变化时仍会立即触发查询。
 
 use crate::config::{RType, Target};
 use crate::log;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -27,7 +27,7 @@ pub struct State {
     entries: HashMap<Target, Entry>,
     fails: u32,
     last_change: Option<Instant>,
-    warned: HashSet<String>,
+    /// key -> 首次告警的 Unix 秒；24h 后自动过期。单一数据源。
     warned_at: HashMap<String, i64>,
     ipv4_endpoint: Option<String>,
     path: Option<PathBuf>,
@@ -116,12 +116,6 @@ impl State {
         };
         let Some(path) = path else { return s };
 
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                let _ = fs::create_dir_all(parent);
-            }
-        }
-
         let data = match fs::read_to_string(&path) {
             Ok(d) => d,
             Err(_) => return s,
@@ -166,7 +160,6 @@ impl State {
         let now = now_unix();
         for w in p.warned {
             if now - w.at_unix < WARN_TTL_SECS {
-                s.warned.insert(w.key.clone());
                 s.warned_at.insert(w.key, w.at_unix);
             }
         }
@@ -220,6 +213,14 @@ impl State {
                 return;
             }
         };
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                if let Err(e) = fs::create_dir_all(parent) {
+                    log::warn(format!("创建状态目录 {} 失败: {e}", parent.display()));
+                    return;
+                }
+            }
+        }
         let tmp = PathBuf::from(format!("{}.tmp", path.display()));
         if let Err(e) = fs::write(&tmp, data) {
             log::warn(format!("写状态文件 {} 失败: {e}", tmp.display()));
@@ -303,13 +304,12 @@ impl State {
     /// 同一告警只打印一次（跨进程重启，24h 后重新允许）。返回 true 表示应打印。
     pub fn warn_once(&mut self, key: impl Into<String>) -> bool {
         let key = key.into();
-        if self.warned.insert(key.clone()) {
-            self.warned_at.insert(key, now_unix());
-            self.dirty = true;
-            true
-        } else {
-            false
+        if self.warned_at.contains_key(&key) {
+            return false;
         }
+        self.warned_at.insert(key, now_unix());
+        self.dirty = true;
+        true
     }
 
     /// 上次成功的 IPv4 探测端点（跨进程保留端点粘性）。

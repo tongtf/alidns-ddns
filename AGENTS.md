@@ -74,7 +74,7 @@ cargo clippy                 # lint（无预配置的门控）
 # 不要做 UPX 压缩：与 systemd MemoryDenyWriteExecute=yes（W^X）冲突
 ```
 
-无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（72 个单测，macOS 另有 7 个地址解析单测）。
+无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（77 个单测，macOS 另有 7 个地址解析单测）。
 
 ## 关键行为
 
@@ -103,7 +103,7 @@ API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `Access
   提供了"写 StateDirectory 标志文件 → root 单元 reload postfix/dovecot"的完整样例（README 有安装步骤）。
   钩子继承环境变量（含 ALIBABA_CLOUD_ACCESS_KEY_SECRET，供 acme.sh 复用），只应配置可信命令
 - 退出码：`78` = 配置/鉴权错误（systemd `RestartPreventExitStatus=78` 不再重启），`2` = 参数错误，`1` = `--once` 单轮失败，`0` = 正常
-- 配置解析失败现在快速失败（退出 78），不再静默用默认值
+- 配置解析失败现在快速失败（退出 78），不再静默用默认值；`config.json` 的未知键同样报错（防拼错）
 - 不要使用子用户 AccessKey
 - 服务部署按 OS 分发（`install.sh` 用 `uname -s` 检测）：
   - Linux：systemd `alidns-ddns.service`（常驻，`Type=notify` + watchdog）+ `EnvironmentFile=/etc/alidns-ddns/env`，需 root；另有可选的 `alidns-ddns-once.service` + `alidns-ddns.timer` 定时模式（`--once`，无需常驻进程）

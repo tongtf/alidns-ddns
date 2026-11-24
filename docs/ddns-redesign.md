@@ -1,7 +1,7 @@
 # alidns-ddns 整体梳理与重构方案
 
 状态：评审稿
-范围：`src/main.rs`（764 行，单体）、`alidns-ddns.service`、`install.sh`、配置模型
+范围：重构前的 `src/main.rs`（764 行，单体）、`alidns-ddns.service`、`install.sh`、配置模型
 配套：`docs/ipv6-address-selection.md`（IPv6 选取细节，本文只引用不重复）
 
 ---
@@ -260,23 +260,19 @@ Linux 下移除 `local-ip-address`。
 ### 3.3 核心类型
 
 ```rust
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct Target { domain: String, rr: String, line: String, rtype: RType }
+// 早期草案中的 V6Pick / Outcome / Retry / Fatal 枚举并未最终采用。
+// 当前实际类型见 src/select.rs 与 src/plan.rs：
 
-struct Desired { v4: Option<Ipv4Addr>, v6: Option<V6Pick> }
-
-enum V6Pick {
-    Strict(Ipv6Addr),          // 全局 + preferred（稳定或临时）
-    Degraded(Ipv6Addr, Why),   // deprecated / ULA / 仅临时
+enum Pick {
+    Use { addr: Ipv6Addr, preferred_lft: u64, warn: Option<&'static str> },
+    Refuse { reason: &'static str },
 }
 
-enum Outcome {
-    InSync,
-    Updated,
-    SkippedLocal(Reason),      // 本地无可用地址：不动 DNS
-    Retry(Reason, Duration),   // 网络/限流：退避后重试
-    Fatal(Reason),             // 鉴权/配置：退出 78
-    TargetError(Target, Reason) // 单目标错误：跳过该目标
+enum StepKind {
+    Update { id: String, value: IpAddr },
+    Add { value: IpAddr },
+    InSync { value: IpAddr },
+    Skip { actual: String },   // Locked：缓存 DNS 真实值
 }
 ```
 

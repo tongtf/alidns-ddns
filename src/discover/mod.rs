@@ -102,8 +102,63 @@ pub fn observe(cfg: &Config, http: &Http, probe: &mut ipv4::Probe, state: &mut S
                 }
             }
             Err(e) => {
-                if state.warn_once("v6-scan-failed") {
-                    log::warn(format!("读取 IPv6 地址失败: {e}；本轮不更新 AAAA 记录"));
+                // netlink 在受限容器里可能被 seccomp 拦截。此时用 UDP connect 的
+                // 源地址作为降级候选（只有地址，没有生命周期），仍按同一套策略过滤。
+                match ipv6::kernel_source_addr() {
+                    Some(addr) => {
+                        let cand = V6Cand {
+                            ifindex: 0,
+                            ifname: "(udp-route)".into(),
+                            addr,
+                            kind: select::V6Kind::Stable,
+                            state: select::V6State::Preferred,
+                            usable: true,
+                            permanent: false,
+                            preferred_lft: u64::MAX,
+                            valid_lft: u64::MAX,
+                            cstamp: 0,
+                        };
+                        match select::select(
+                            &[cand],
+                            &select::Cfg {
+                                prefer: cfg.ipv6_prefer,
+                                allow_ula: cfg.allow_ula,
+                            },
+                            Some(addr),
+                        ) {
+                            Some(Pick::Use { addr, warn, .. }) => {
+                                if state.warn_once("v6-netlink-fallback") {
+                                    log::warn(format!(
+                                        "netlink 不可用（{e}），回退 UDP 源地址 {addr}；无生命周期信息，无法提前复查"
+                                    ));
+                                }
+                                if let Some(w) = warn {
+                                    if state.warn_once(w) {
+                                        log::warn(w);
+                                    }
+                                }
+                                desired.v6 = Some(IpAddr::V6(addr));
+                                desired.v6_lft = None;
+                            }
+                            Some(Pick::Refuse { reason }) => {
+                                if state.warn_once(reason) {
+                                    log::warn(format!("{reason}；本轮不更新 AAAA 记录"));
+                                }
+                            }
+                            None => {
+                                if state.warn_once("v6-fallback-none") {
+                                    log::warn("UDP 源地址不可用，本轮不更新 AAAA 记录");
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        if state.warn_once("v6-scan-failed") {
+                            log::warn(format!(
+                                "读取 IPv6 地址失败（{e}），且 UDP 源地址不可用；本轮不更新 AAAA 记录"
+                            ));
+                        }
+                    }
                 }
             }
         }

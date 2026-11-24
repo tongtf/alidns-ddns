@@ -219,12 +219,12 @@ struct V6Cand {
     addr: Ipv6Addr,
     kind: V6Kind,
     state: V6State,
-    scope: Scope,          // Global | Ula
+    // scope 不存字段，由 scope_of(&addr) 实时推导：Global | Ula | Skip
     usable: bool,          // !tentative && !dadfailed && !optimistic
     permanent: bool,       // IFA_F_PERMANENT：手工/静态配置
     preferred_lft: u64,    // 剩余秒数；0xFFFFFFFF 表示 forever
     valid_lft: u64,
-    cstamp: u64,           // 创建时刻（开机后 1/100 秒），判新旧用
+    cstamp: u32,           // 创建时刻（开机后 1/100 秒），判新旧用（u32 回绕安全）
 }
 ```
 
@@ -329,7 +329,7 @@ macOS 没有 `cstamp`，同桶排序退化为比较 `valid_lft`（新 SLAAC 地�
 ## 6. 选择算法
 
 ```rust
-fn select_v6(cands: &[V6Cand], cfg: &V6Cfg) -> Option<&V6Cand>
+fn select(cands: &[V6Cand], cfg: &Cfg, kernel_pick: Option<Ipv6Addr>) -> Option<Pick>
 ```
 
 ### 6.1 硬过滤（顺序无关）
@@ -401,9 +401,12 @@ T0+2d       : A 被内核删除              -> 无影响
 - 在调用 `update_dns()` 前**重新读取一次**候选，若与待写值不一致则用新值
 - 若重读为空 → 跳过本轮（不写空值）
 
-### 7.2 防抖（可选）
+### 7.2 防抖（**二期设想，尚未实现**）
 
-`--ipv6-settle <N>`，默认 `1`：
+> 当前版本没有防抖：`--ipv6-settle` / `ALIDNS_IPV6_SETTLE` / `Ipv6Settle` 均不存在。
+> 变更后的加速复查由 `schedule()` 的 60s 窗口实现。
+
+`--ipv6-settle <N>`，默认 `1`（规划中）：
 
 - `1`：立即切换（满足"尽快用上新 IP"）
 - `>1`：要求连续 N 轮结果一致才切换，用于抑制短暂双 preferred 造成的抖动
@@ -442,10 +445,10 @@ T0+2d       : A 被内核删除              -> 无影响
 | CLI | 环境变量 | config.json | 默认 | 说明 |
 |---|---|---|---|---|
 | `--ipv6-prefer` | `ALIDNS_IPV6_PREFER` | `Ipv6Prefer` | `auto` | `auto` / `stable` / `temporary` |
-| `--ipv6-settle` | `ALIDNS_IPV6_SETTLE` | `Ipv6Settle` | `1` | 连续一致轮数 |
+| ~~`--ipv6-settle`~~ | ~~`ALIDNS_IPV6_SETTLE`~~ | ~~`Ipv6Settle`~~ | — | **二期设想，未实现** |
 
 `--ipv6-prefer` 非法值 → 报错退出（与 `--interval` 一致的处理风格）。
-`--ipv6-settle` 下限 1。
+防抖选项下限 1（未实现）。
 
 ## 10. 日志
 
