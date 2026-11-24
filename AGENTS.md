@@ -33,16 +33,21 @@ CLI参数（手写解析，支持 `--k=v`） > systemd LoadCredential 文件 > �
 
 # 等价环境变量
 ALIBABA_CLOUD_ACCESS_KEY_ID / ALIBABA_CLOUD_ACCESS_KEY_SECRET
-ALIDNS_DOMAIN / ALIDNS_RR（默认 @）
+DDNS_DOMAIN / DDNS_RR（默认 @）
 DDNS_IPV（4/6/46，默认 6）
 DDNS_INTERVAL（秒，默认 300，最小 1）
 DDNS_VERIFY_INTERVAL（IP 未变时的 DNS 对账周期，默认 21600）
 DDNS_TTL（默认 600）、DDNS_LINE（默认 default）
-ALIDNS_IPV6_PREFER（auto/stable/temporary，默认 auto）
+DDNS_IPV6_PREFER（auto/stable/temporary，默认 auto）
 DDNS_ALLOW_ULA（默认 false，不允许把 ULA 写入公网 AAAA）
 DDNS_STATE_FILE（状态文件路径；默认见下文；--no-state 可禁用）
 DDNS_ON_CHANGE / DDNS_ON_CHANGE_TIMEOUT（IP 实际变化后执行的钩子，默认 60s 超时）
-ALIDNS_INTERFACE（网卡名，如 eth0，默认自动搜索；不存在时 warning 并回退）
+DDNS_INTERFACE（网卡名，如 eth0，默认自动搜索；不存在时 warning 并回退）
+DDNS_NO_EVENTS（关闭 netlink 事件订阅，部署项）；DDNS_NO_STATE（禁用持久化）
+
+# config.json 只放业务配置（snake_case 键名）：domain / rr / ipv / interval /
+# verify_interval / ttl / line / ipv6_prefer / allow_ula / interface /
+# on_change / on_change_timeout。密钥与 StateFile 不得写入（旧键直接报错）。
 
 > 网卡选择仅用于本地 IPv6 获取。Linux 用 netlink `RTM_GETADDR` 读取 `IFA_FLAGS` 和
 > `IFA_CACHEINFO`（preferred/valid lifetime、cstamp），按 RFC 4862/4941 区分
@@ -51,7 +56,7 @@ ALIDNS_INTERFACE（网卡名，如 eth0，默认自动搜索；不存在时 warn
 > 指定网卡没有可用地址时打印 warning 并回退自动搜索。IPv4 探测带端点粘性，
 > 且必须校验公网性，私网/CGNAT/保留地址一律拒绝。
 
-# 配置文件路径
+# 配置文件路径（业务配置；凭证走 env / LoadCredential）
 ./alidns-ddns -c /path/to/config.json    # 默认 ./config.json
 
 # IP 变化钩子：只在 A/AAAA 真正写入后执行，环境变量 DDNS_CHANGED/DDNS_IPV4/
@@ -74,7 +79,7 @@ cargo clippy                 # lint（无预配置的门控）
 # 不要做 UPX 压缩：与 systemd MemoryDenyWriteExecute=yes（W^X）冲突
 ```
 
-无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（83 个单测，macOS 另有 7 个地址解析单测）。
+无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（86 个单测，macOS 另有 7 个地址解析单测）。
 
 ## 关键行为
 

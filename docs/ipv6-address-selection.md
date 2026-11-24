@@ -403,7 +403,7 @@ T0+2d       : A 被内核删除              -> 无影响
 
 ### 7.2 防抖（**二期设想，尚未实现**）
 
-> 当前版本没有防抖：`--ipv6-settle` / `ALIDNS_IPV6_SETTLE` / `Ipv6Settle` 均不存在。
+> 当前版本没有防抖：`--ipv6-settle` / `DDNS_IPV6_SETTLE` / `Ipv6Settle` 均不存在。
 > 变更后的加速复查由 `schedule()` 的 60s 窗口实现。
 
 `--ipv6-settle <N>`，默认 `1`（规划中）：
@@ -444,8 +444,8 @@ T0+2d       : A 被内核删除              -> 无影响
 
 | CLI | 环境变量 | config.json | 默认 | 说明 |
 |---|---|---|---|---|
-| `--ipv6-prefer` | `ALIDNS_IPV6_PREFER` | `Ipv6Prefer` | `auto` | `auto` / `stable` / `temporary` |
-| ~~`--ipv6-settle`~~ | ~~`ALIDNS_IPV6_SETTLE`~~ | ~~`Ipv6Settle`~~ | — | **二期设想，未实现** |
+| `--ipv6-prefer` | `DDNS_IPV6_PREFER` | `ipv6_prefer` | `auto` | `auto` / `stable` / `temporary` |
+| ~~`--ipv6-settle`~~ | ~~`DDNS_IPV6_SETTLE`~~ | ~~`Ipv6Settle`~~ | — | **二期设想，未实现** |
 
 `--ipv6-prefer` 非法值 → 报错退出（与 `--interval` 一致的处理风格）。
 防抖选项下限 1（未实现）。
