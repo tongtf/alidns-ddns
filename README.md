@@ -161,6 +161,10 @@ sudo journalctl -u alidns-ddns -n 20 -f
 启用后可以从 `/etc/alidns-ddns/env` 中删掉 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET`
 两行（其余非敏感配置仍可保留在 env 或 config.json 中）。
 
+每次启动会强制执行端到端自检，逐阶段打印：
+配置与凭证、状态目录可写、DNS API（强制读一次）、IP 发现、事件订阅、钩子配置；
+全部通过后才进入主循环，任一阶段失败会打印 `启动自检 N/6 失败` 并以 78（配置/鉴权）或 1（其他）退出。
+
 > 若 systemd 版本较老不支持 `LoadCredential`，请继续使用 `chmod 600` 的 `EnvironmentFile`
 > 并在其中设置 `ALIBABA_CLOUD_ACCESS_KEY_ID/SECRET`；密钥不要写进 `config.json`（旧键会报错）。
 

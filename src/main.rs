@@ -16,7 +16,7 @@ mod select;
 mod state;
 mod util;
 
-use aliyun::{ApiError, Client};
+use aliyun::{ApiError, Client, API_LIST_RECORDS};
 use config::{Config, Target, EX_CONFIG};
 use plan::{Desired, Step, StepKind};
 use state::State;
@@ -99,11 +99,30 @@ fn run() -> i32 {
 
     let by_domain = group_targets(&cfg.targets);
 
+    let desired = match startup_check(
+        &client,
+        &cfg,
+        &by_domain,
+        &mut state,
+        &http,
+        &mut probe,
+        events.is_some(),
+    ) {
+        Ok(d) => d,
+        Err(code) => {
+            notify("STATUS=启动自检失败");
+            return code;
+        }
+    };
+    let mut initial_desired = Some(desired);
+
     notify("READY=1");
 
     loop {
         notify("WATCHDOG=1");
-        let desired = discover::observe(&cfg, &http, &mut probe, &mut state);
+        let desired = initial_desired
+            .take()
+            .unwrap_or_else(|| discover::observe(&cfg, &http, &mut probe, &mut state));
         // Probe 持运行时值；State 只是持久化镜像（set_ipv4_endpoint 内部负责去重）
         state.set_ipv4_endpoint(probe.sticky_endpoint());
 
@@ -183,6 +202,129 @@ struct Summary {
     skipped: usize,
     /// 实际发生写入（Update/Add）的目标，供 on-change 钩子使用。
     changed: Vec<Target>,
+}
+
+/// 每次启动都执行的端到端自检。失败时返回退出码：78=配置/鉴权，1=其他功能异常。
+fn startup_check(
+    client: &Client,
+    cfg: &Config,
+    by_domain: &BTreeMap<String, Vec<Target>>,
+    state: &mut State,
+    http: &discover::Http,
+    probe: &mut discover::ipv4::Probe,
+    events_ok: bool,
+) -> Result<Desired, i32> {
+    notify("WATCHDOG=1");
+    log::info(format!(
+        "启动自检 1/6: 配置与凭证已加载（配置文件 {}，目标 {} 个）",
+        cfg.config_path.display(),
+        cfg.targets.len()
+    ));
+
+    notify("WATCHDOG=1");
+    if cfg.dry_run {
+        log::info(format!(
+            "启动自检 2/6: 跳过状态目录写入检查（dry-run），状态文件 {}",
+            cfg.state_file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "未启用".into())
+        ));
+    } else {
+        match &cfg.state_file {
+            Some(p) => log::info(format!(
+                "启动自检 2/6: 检查状态目录 {}，文件 {}，探针 {}",
+                p.parent()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|| ".".into()),
+                p.file_name().unwrap_or_default().to_string_lossy(),
+                p.with_extension(format!("selftest-{}", std::process::id()))
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            )),
+            None => log::info("启动自检 2/6: 状态持久化已禁用，跳过目录检查"),
+        }
+        match state.check_writable() {
+            Ok(()) => log::info("启动自检 2/6: 状态目录检查通过"),
+            Err(e) => {
+                log::error(format!("启动自检 2/6 失败: {e}"));
+                return Err(1);
+            }
+        }
+    }
+
+    notify("WATCHDOG=1");
+    match by_domain.keys().next() {
+        None => {
+            log::error("启动自检 3/6 失败: 没有可对账的目标");
+            return Err(EX_CONFIG);
+        }
+        Some(domain) => {
+            log::info(format!(
+                "启动自检 3/6: 调用 Aliyun DNS API {}（域名 {}，PageSize=500）",
+                API_LIST_RECORDS, domain
+            ));
+            match client.list_records(domain) {
+                Ok(records) => log::info(format!(
+                    "启动自检 3/6: DNS API {} 成功（域名 {domain}，读到 {} 条记录）",
+                    API_LIST_RECORDS,
+                    records.len()
+                )),
+                Err(e) => {
+                    log::error(format!(
+                        "启动自检 3/6 失败: API {API_LIST_RECORDS} 调用异常: {e}"
+                    ));
+                    return Err(if e.fatal() { EX_CONFIG } else { 1 });
+                }
+            }
+        }
+    }
+
+    notify("WATCHDOG=1");
+    log::info(format!(
+        "启动自检 4/6: 探测公网 IPv4（多 HTTP 端点）并枚举本机 IPv6（{}）...",
+        if cfg!(target_os = "linux") {
+            "Linux netlink RTM_GETADDR"
+        } else {
+            "macOS ifconfig -a -L"
+        }
+    ));
+    let desired = discover::observe(cfg, http, probe, state);
+    if desired.v4.is_none() && desired.v6.is_none() {
+        log::error("启动自检 4/6 失败: 未获取到任何可用公网 IP");
+        return Err(1);
+    }
+    log::info(format!(
+        "启动自检 4/6: IP 发现成功（IPv4={}, IPv6={}）",
+        desired
+            .v4
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "无".into()),
+        desired
+            .v6
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "无".into())
+    ));
+
+    notify("WATCHDOG=1");
+    if events_ok {
+        log::info("启动自检 5/6: 已订阅 netlink 组 RTMGRP_IPV6_IFADDR（地址变更提前唤醒）");
+    } else {
+        log::info("启动自检 5/6: 未启用地址变更事件（--no-events 或平台不支持），使用定时轮询");
+    }
+
+    notify("WATCHDOG=1");
+    match &cfg.on_change {
+        Some(cmd) => log::info(format!(
+            "启动自检 6/6: 变更钩子已配置（来源 config.json on_change / DDNS_ON_CHANGE，自检不执行）: {}",
+            cmd.split_whitespace().next().unwrap_or(cmd)
+        )),
+        None => log::info("启动自检 6/6: 未配置变更钩子"),
+    }
+
+    log::info("启动自检完成: 全部通过");
+    Ok(desired)
 }
 
 /// 唯一的落盘入口；dry-run 连状态文件都不碰。

@@ -79,7 +79,7 @@ cargo clippy                 # lint（无预配置的门控）
 # 不要做 UPX 压缩：与 systemd MemoryDenyWriteExecute=yes（W^X）冲突
 ```
 
-无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（86 个单测，macOS 另有 7 个地址解析单测）。
+无 `[dev-dependencies]`：核心逻辑均为纯函数，直接用 `cargo test` 即可（87 个单测，macOS 另有 7 个地址解析单测）。
 
 ## 关键行为
 
@@ -88,8 +88,9 @@ cargo clippy                 # lint（无预配置的门控）
 3. `apply`：IP 变化时更新 / 新建 A / AAAA；`Status=Disable` 告警、Locked 跳过
 4. `schedule`：默认 300s；刚变更后 60s 内复查；`preferred_lft` 快到期时提前唤醒；失败指数退避 30s→5min；Linux 订阅 `RTMGRP_IPV6_IFADDR` 事件提前唤醒
 5. 期望值未变且未到 `verify-interval` 时完全跳过 DNS 查询；错误分类：网络退避、限流退避、鉴权/时钟退出 78
-6. IP 真正写入后执行 `--on-change` 钩子（同步、带超时、失败只告警；`--dry-run` 不执行）
-7. 状态原子落盘（`state.json`，版本号 + 原子 rename），跨进程重启保留缓存/退避/端点粘性；
+6. **每次启动强制端到端自检**：配置/凭证、状态目录可写、DNS API（强制读一次）、IP 发现、事件订阅、钩子配置，逐阶段打印日志；任一失败即退出（78/1），不再进入主循环
+7. IP 真正写入后执行 `--on-change` 钩子（同步、带超时、失败只告警；`--dry-run` 不执行）
+8. 状态原子落盘（`state.json`，版本号 + 原子 rename），跨进程重启保留缓存/退避/端点粘性；
    `--dry-run` 不写状态文件。systemd 单元已设 `StateDirectory=alidns-ddns`（导出 `$STATE_DIRECTORY`）
 
 API 签名为手写 **ACS3-HMAC-SHA256（V3 签名）**，签名 Key 为 `AccessKeySecret`（不附加 `&`）。参数通过 HTTP Header（`Authorization`/`x-acs-*`）传递，非 Query 参数。
